@@ -1,0 +1,3 @@
+#!/bin/sh
+# OpenTimestamps: silently submit commit hash to calendars in background
+git ots run >/dev/null 2>&1 &

@@ -1,0 +1,34 @@
+name: OpenTimestamps Daily Upgrade & Verify
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  ots:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenTimestamps
+        run: pip install git-ots
+
+      - name: Fetch OTS proofs
+        run: git fetch origin 'refs/ots/*:refs/ots/*' || true
+
+      - name: Upgrade pending timestamps
+        run: git ots upgrade
+
+      - name: Verify all timestamps
+        run: git ots verify
+
+      - name: Push upgraded proofs back to GitHub
+        run: git push origin 'refs/ots/*:refs/ots/*'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

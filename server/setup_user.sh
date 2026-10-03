@@ -1,4 +1,27 @@
 #!/bin/bash
+# ==============================================================================
+# Script:      setup_user.sh
+# Category:    server
+# Description: Provisions a new Linux user with Zsh, SSH keys, and rootless Podman.
+# Target:      Linux servers (Debian/Ubuntu/Arch/Alpine) with systemd
+# Usage:       sudo ./setup_user.sh [--help]
+# ==============================================================================
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: sudo $0"
+    echo ""
+    echo "Interactive script to provision a server user account:"
+    echo "  - Creates user with /bin/zsh"
+    echo "  - Configures SSH public key in ~/.ssh/authorized_keys"
+    echo "  - Sets up rootless Podman with lingering and user socket"
+    exit 0
+fi
+
+# Ensure running with sufficient privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: Please run as root (or via sudo)."
+    exit 1
+fi
 
 # Prompt for inputs
 read -p "Enter username: " TARGET_USER
