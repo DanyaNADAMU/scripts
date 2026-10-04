@@ -55,8 +55,9 @@ DEFAULT_DOMAIN = "nada.mu"
 DEFAULT_AUTHOR = "DanyaNADAMU <git@nada.mu>"
 DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
+DEFAULT_WATERMARK = "NADAMU"
 APP_NAME = "sign-image"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -99,7 +100,7 @@ def load_config() -> dict[str, Any]:
         "policy_url": DEFAULT_POLICY_URL,
         "default_license": f"All rights reserved. Verified at {DEFAULT_POLICY_URL}",
         "digital_source_type": DEFAULT_SOURCE_TYPE,
-        "watermark_text": DEFAULT_DOMAIN,
+        "watermark_text": DEFAULT_WATERMARK,
         "watermark_delta": 35.0,
         "watermark_repeats": 3,
     }
@@ -133,11 +134,15 @@ def _idct2(a: np.ndarray) -> np.ndarray:
     return idct(idct(a.T, norm="ortho").T, norm="ortho")
 
 
+PRIMARY_MAGIC = b"NADAMU"
+VALID_MAGICS = (b"NADAMU", b"nada.mu", b"mu.nada", b"NADA")
+
+
 def _make_watermark_packet(text: str) -> list[int]:
-    """Frames text into a packet: [MAGIC 'NADA' (4B)] [LEN (1B)] [PAYLOAD] [CRC8 (1B)]."""
+    """Frames text into a packet: [MAGIC 'NADAMU' (6B)] [LEN (1B)] [PAYLOAD] [CRC8 (1B)]."""
     raw = text.encode("utf-8")
     crc = zlib.crc32(raw) & 0xFF
-    packet = b"NADA" + bytes([len(raw)]) + raw + bytes([crc])
+    packet = PRIMARY_MAGIC + bytes([len(raw)]) + raw + bytes([crc])
     bits = []
     for b in packet:
         for i in range(7, -1, -1):
@@ -146,22 +151,37 @@ def _make_watermark_packet(text: str) -> list[int]:
 
 
 def _parse_watermark_packet(bits: list[int]) -> str | None:
-    """Parses bits and validates magic header and CRC8 checksum."""
+    """Parses bits and validates magic header (NADAMU, nada.mu, mu.nada, NADA) and CRC8."""
     if len(bits) < 48:
         return None
     data = bytearray()
     for i in range(0, len(bits) - 7, 8):
         byte_val = int("".join(str(b) for b in bits[i : i + 8]), 2)
         data.append(byte_val)
-    if len(data) < 6 or data[:4] != b"NADA":
+
+    # Check supported magic prefixes in order of priority
+    matched_magic: bytes | None = None
+    for magic in VALID_MAGICS:
+        if data.startswith(magic):
+            matched_magic = magic
+            break
+
+    if not matched_magic:
         return None
-    length = data[4]
-    if len(data) < 5 + length + 1:
+
+    m_len = len(matched_magic)
+    if len(data) < m_len + 2:
         return None
-    raw = bytes(data[5 : 5 + length])
-    expected_crc = data[5 + length]
+
+    payload_len = data[m_len]
+    if len(data) < m_len + 1 + payload_len + 1:
+        return None
+
+    raw = bytes(data[m_len + 1 : m_len + 1 + payload_len])
+    expected_crc = data[m_len + 1 + payload_len]
     if (zlib.crc32(raw) & 0xFF) != expected_crc:
         return None
+
     return raw.decode("utf-8", errors="ignore")
 
 
@@ -187,6 +207,11 @@ def embed_dwt_watermark(
     total_blocks = blocks_h * blocks_w
 
     packet_bits = _make_watermark_packet(text)
+
+    # Adapt repeats if image resolution limits capacity but can still fit lower redundancy
+    if repeats > 1 and len(packet_bits) * repeats > total_blocks >= len(packet_bits):
+        repeats = max(1, total_blocks // len(packet_bits))
+
     expanded_bits: list[int] = []
     for b in packet_bits:
         expanded_bits.extend([b] * repeats)
@@ -244,7 +269,7 @@ def extract_dwt_watermark(
     blocks_h, blocks_w = h // 8, w // 8
     total_blocks = blocks_h * blocks_w
 
-    max_bits = (6 + max_payload_bytes) * 8 * repeats
+    max_bits = (16 + max_payload_bytes) * 8 * repeats
     num_to_read = min(max_bits, total_blocks)
 
     rng = random.Random(secret)
@@ -260,13 +285,19 @@ def extract_dwt_watermark(
         d = _dct2(block)
         raw_bits.append(1 if d[1, 2] > d[2, 1] else 0)
 
-    # Majority voting over repetitions to filter compression noise
-    voted_bits: list[int] = []
-    for i in range(0, len(raw_bits) - repeats + 1, repeats):
-        chunk = raw_bits[i : i + repeats]
-        voted_bits.append(1 if sum(chunk) > (repeats // 2) else 0)
+    # Try configured repetition first, then fallback to 1 (unrepeated) if needed
+    repeats_candidates = [repeats] if repeats == 1 else [repeats, 1]
+    for rep in repeats_candidates:
+        voted_bits: list[int] = []
+        for i in range(0, len(raw_bits) - rep + 1, rep):
+            chunk = raw_bits[i : i + rep]
+            voted_bits.append(1 if sum(chunk) > (rep // 2) else 0)
 
-    return _parse_watermark_packet(voted_bits)
+        res = _parse_watermark_packet(voted_bits)
+        if res is not None:
+            return res
+
+    return None
 
 
 def get_default_secret() -> str:
@@ -274,7 +305,7 @@ def get_default_secret() -> str:
     if DEFAULT_KEY_PATH.is_file():
         key_data = DEFAULT_KEY_PATH.read_bytes()
         return hashlib.sha256(key_data).hexdigest()
-    return "nada.mu-default-watermark-key"
+    return "NADAMU-default-watermark-key"
 
 
 # ------------------------------------------------------------------------------
@@ -498,7 +529,7 @@ def process_signing(
     act_policy = cfg.get("policy_url", DEFAULT_POLICY_URL)
     act_license = license_text or cfg.get("default_license", "")
     src_type = cfg.get("digital_source_type", DEFAULT_SOURCE_TYPE)
-    wm_text = watermark_payload or cfg.get("watermark_text", act_domain)
+    wm_text = watermark_payload or cfg.get("watermark_text", DEFAULT_WATERMARK)
     wm_secret = secret or get_default_secret()
     wm_delta = float(cfg.get("watermark_delta", 35.0))
     wm_repeats = int(cfg.get("watermark_repeats", 3))
@@ -719,7 +750,7 @@ Examples:
     p_sign.add_argument("-d", "--domain", type=str, help="Signing domain")
     p_sign.add_argument("-m", "--description", type=str, help="Custom action description")
     p_sign.add_argument("-l", "--license", type=str, help="License or copyright text")
-    p_sign.add_argument("-w", "--watermark", type=str, help="Custom invisible watermark text (default: domain)")
+    p_sign.add_argument("-w", "--watermark", type=str, help="Custom invisible watermark text (default: NADAMU)")
     p_sign.add_argument("--no-watermark", action="store_true", help="Disable invisible DWT-DCT watermark")
     p_sign.add_argument("--no-c2pa", action="store_true", help="Disable C2PA manifest signing")
     p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
