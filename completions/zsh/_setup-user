@@ -1,0 +1,8 @@
+#compdef setup-user
+
+_setup_user() {
+    _arguments \
+        '(-h --help)'{-h,--help}'[Display help message]'
+}
+
+_setup_user "$@"

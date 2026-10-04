@@ -1,0 +1,37 @@
+.TH SCRIPTS 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+scripts \- unified manager for the nada.mu personal utilities ecosystem
+.SH SYNOPSIS
+.B scripts
+[\fBcommand\fR] [\fBoptions\fR]
+.SH DESCRIPTION
+\fBscripts\fR manages the installation, updates, and removal of personal administration, workstation, and cryptographic utilities.
+It supports both local development workflows and standalone remote installations.
+.SH COMMANDS
+.TP
+.B install
+Installs scripts into the user's local path (\fB~/.local/bin\fR) or system path (\fB/usr/local/bin\fR).
+.TP
+.B update
+Fetches updates from upstream and syncs installed utilities, reporting changed SHA-256 digests.
+.TP
+.B list
+Lists all utilities declared in the manifest, showing their installation status and paths.
+.TP
+.B uninstall
+Removes installed utilities, man pages, and shell completions.
+.SH OPTIONS
+.TP
+.BR \-\-scope " " \fIuser\fR|\fIsystem\fR
+Target directory scope: \fBuser\fR for \fB~/.local/bin\fR (default) or \fBsystem\fR for \fB/usr/local/bin\fR (requires root).
+.TP
+.BR \-\-category " " \fIall\fR|\fIserver\fR|\fIdesktop\fR|\fImedia\fR
+Filter which categories of scripts to install.
+.TP
+.BR \-y ", " \-\-yes
+Run non-interactively, accepting all defaults.
+.TP
+.BR \-h ", " \-\-help
+Show help synopsis.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.

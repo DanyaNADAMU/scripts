@@ -1,0 +1,31 @@
+.TH SETUP-USER 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+setup-user \- provision a new Linux user with Zsh, SSH keys, and rootless Podman
+.SH SYNOPSIS
+.B sudo setup-user
+[\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+\fBsetup-user\fR is an administrative utility for Linux servers (systemd-based).
+It provisions or updates a user account with the following features:
+.IP \(bu 3
+Sets the user's login shell to \fB/bin/zsh\fR.
+.IP \(bu 3
+Adds a specified SSH public key to \fB~/.ssh/authorized_keys\fR with strict permissions (0700/0600).
+.IP \(bu 3
+Enables systemd user lingering via \fBloginctl enable-linger\fR.
+.IP \(bu 3
+Configures rootless \fBPodman\fR by starting the user socket (\fBpodman.socket\fR) and enabling the restart service.
+.IP \(bu 3
+Appends required environment variables (\fBDOCKER_HOST\fR, \fBXDG_RUNTIME_DIR\fR, \fBDBUS_SESSION_BUS_ADDRESS\fR) idempotently to shell profiles (\fB.bashrc\fR, \fB.zshrc\fR).
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Displays brief command-line help and exits.
+.SH REQUIREMENTS
+Requires root privileges (\fBsudo\fR). Dependencies include \fBbash\fR, \fBsystemd\fR, \fBzsh\fR, and \fBpodman\fR.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR scripts (1),
+.BR podman (1),
+.BR loginctl (1)

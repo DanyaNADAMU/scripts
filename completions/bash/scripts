@@ -1,0 +1,29 @@
+# Bash completion for scripts
+_scripts_completions() {
+    local cur prev commands
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="install update list uninstall help"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    case "$prev" in
+        --scope)
+            COMPREPLY=( $(compgen -W "user system" -- "$cur") )
+            return 0
+            ;;
+        --category)
+            COMPREPLY=( $(compgen -W "all server desktop media" -- "$cur") )
+            return 0
+            ;;
+        *)
+            local options="--scope --category --yes --help"
+            COMPREPLY=( $(compgen -W "$options" -- "$cur") )
+            return 0
+            ;;
+    esac
+}
+complete -F _scripts_completions scripts

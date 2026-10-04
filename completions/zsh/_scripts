@@ -1,0 +1,46 @@
+#compdef scripts
+
+_scripts() {
+    local -a commands
+    commands=(
+        'install:Install scripts and utilities into user or system path'
+        'update:Sync and update installed scripts from repository'
+        'list:List all declared and installed scripts'
+        'uninstall:Remove installed scripts, man pages, and completions'
+        'help:Show help information'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'scripts command' commands
+            ;;
+        args)
+            case $words[1] in
+                install|update)
+                    _arguments \
+                        '--scope[Target installation directory]:scope:(user system)' \
+                        '--category[Filter by script category]:category:(all server desktop media)' \
+                        '(-y --yes)'{-y,--yes}'[Run non-interactively, accepting all defaults]' \
+                        '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+                uninstall)
+                    _arguments \
+                        '--scope[Target directory scope]:scope:(user system)' \
+                        '(-y --yes)'{-y,--yes}'[Skip confirmation prompt]' \
+                        '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+                list)
+                    _arguments \
+                        '--scope[Target directory scope]:scope:(user system)' \
+                        '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_scripts "$@"

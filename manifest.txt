@@ -1,0 +1,5 @@
+# ==============================================================================
+# Scripts Manifest
+# Format: <repo_source_path>:<command_name>:<category>:<description>
+# ==============================================================================
+server/setup_user.sh:setup-user:server:Provision Linux user with Zsh, SSH key, and rootless Podman

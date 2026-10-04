@@ -6,7 +6,7 @@ All commits are cryptographically signed with SSH Ed25519 (`git@nada.mu`) and an
 
 ---
 
-## Directory Structure & Categories
+## Directory Structure & Architecture
 
 ```text
 scripts/
@@ -14,8 +14,18 @@ scripts/
 ├── .githooks/               # Git post-commit & pre-push hooks
 ├── .allowed_signers         # Canonical trusted SSH commit signers
 ├── SECURITY.md              # Security policy & disclosure guidelines
-├── install.sh               # Symlink installer to ~/.local/bin
+├── manifest.txt             # Single source of truth for all declared utilities
+├── scripts                  # Unified CLI manager (install, update, list, uninstall)
+├── install.sh               # Bootstrap launcher (local & curl | bash)
 ├── README.md                # Repository index & documentation
+│
+├── docs/                    # Documentation & man pages
+│   ├── STANDARDS.md         # Engineering & documentation standards
+│   └── man/man1/            # Troff Linux man pages (setup-user.1, scripts.1)
+│
+├── completions/             # Shell tab-completions
+│   ├── bash/                # Bash completions
+│   └── zsh/                 # Zsh completions
 │
 ├── server/                  # Server-side administration & provisioning
 │   └── setup_user.sh        # Linux user provisioning with rootless Podman
@@ -29,85 +39,94 @@ scripts/
 
 ---
 
-## Script Catalog
+## Quick Start & Installation
 
-| Command | Source Path | Category | Description | Runtime / Dependencies |
-| :--- | :--- | :--- | :--- | :--- |
-| `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
-| `sign-image` | `media/sign_image.py` | **Media** | Signs images with C2PA manifests, DWT steganographic marks, and OpenTimestamps. | Python $\ge$ 3.11, `uv` |
+### Option 1: Standalone Install via `curl | bash` (No git clone needed)
+Ideal for fresh servers or remote workstations:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | bash
+```
+
+The interactive wizard will prompt you:
+1. **Scope:** User (`~/.local/bin`, no sudo) or System (`/usr/local/bin`, requires sudo).
+2. **Category:** `all`, `server`, `desktop`, or `media`.
+
+#### Unattended / Non-Interactive Install:
+```bash
+# Install server utilities to ~/.local/bin without prompts
+curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | bash -s -- --scope user --category server -y
+
+# System-wide installation
+curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | sudo bash -s -- --scope system -y
+```
 
 ---
 
-## Standards & Documentation Policy
-
-To prevent "mystery scripts" that become unmaintainable over time, every script in this repository must adhere to the following rules:
-
-### 1. Mandatory Metadata Header
-Every script must begin with a standardized metadata block specifying its purpose, target environment, and usage:
+### Option 2: Developer Workflow (Cloned Repository)
+For developing and contributing to scripts:
 
 ```bash
-#!/usr/bin/env bash
-# ==============================================================================
-# Script:      example.sh
-# Category:    server | desktop | media
-# Description: One-line concise explanation of what this script does.
-# Target:      Linux server / Desktop / Cross-platform
-# Requires:    package1, package2 (or uv/python packages)
-# Usage:       ./example.sh [options]
-# ==============================================================================
-```
-
-### 2. Mandatory `--help` Support
-Every script must support `-h` and `--help` flags:
-* **Shell scripts:** Must implement a `show_help()` function and exit cleanly with status code `0`.
-* **Python scripts:** Must use `argparse` or `click` to provide self-documenting CLI flags with descriptions and default values.
-
-### 3. Language & Runtime Guidelines
-* **Bash (`.sh`):** Used exclusively for lightweight system orchestration, OS provisioning, and invoking native binaries. Must enable strict error handling (`set -e` or `set -euo pipefail`).
-* **Python (`.py`):** Used for complex logic, media processing, cryptographic operations, and APIs. Python scripts should be runnable via `uv run` to ensure isolated, reproducible dependency management without polluting system packages.
-
----
-
-## Installation & Deployment
-
-### Recommended Location
-The canonical location for this repository on any host (server `berg`, workstation `danya`) is:
-```text
-~/projects/scripts
-```
-
-### Exposing Commands to `$PATH`
-Executable scripts should **never** be copied directly into `/usr/local/bin` because it breaks Git tracking. Instead, symlink them into `~/.local/bin` using the included installer:
-
-```bash
-# Clone the repository
+# 1. Clone into standard projects directory
 git clone https://github.com/DanyaNADAMU/scripts.git ~/projects/scripts
 cd ~/projects/scripts
 
-# Install symlinks into ~/.local/bin
-./install.sh
+# 2. Link utilities into ~/.local/bin (symlinks allow live edits)
+./scripts install --scope user -y
 ```
 
-Ensure `~/.local/bin` is in your shell's `$PATH` (in `~/.zshrc` or `~/.bashrc`):
+Ensure `~/.local/bin` is in your `$PATH` (in `~/.zshrc` or `~/.bashrc`):
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Once installed, scripts can be run directly from any directory:
+---
+
+## Management via the `scripts` Command
+
+Once installed, the `scripts` manager is available anywhere in your terminal:
+
 ```bash
-setup-user --help
-sign-image --help
+scripts list                 # View all declared utilities and installation status
+scripts update               # Pull upstream updates and sync files with SHA-256 report
+scripts uninstall            # Cleanly remove all utilities, man pages, and completions
+scripts --help               # View command options and help
 ```
+
+### Transparent Updates & Orphan Handling
+When running `scripts update`:
+* It verifies SHA-256 checksums and reports exactly what changed (`[+] Added`, `[↑] Updated`, `[=] Up to date`).
+* If a script was previously installed but was deleted from the upstream repository, `scripts update` warns you and prompts whether you want to clean it up.
 
 ---
 
-## Updates & Maintenance
+## Documentation & Manual Pages
 
-To keep scripts updated across machines, add an alias to your shell configuration:
+Every utility provides multi-level documentation:
+1. **Interactive CLI Help:** Run `<command> --help` or `<command> -h` for quick flags and usage.
+2. **Linux Man Pages:** Installed automatically into `~/.local/share/man/man1/` or `/usr/local/share/man/man1/`:
+   ```bash
+   man setup-user
+   man scripts
+   ```
+3. **Repository Specifications:** See [`docs/STANDARDS.md`](docs/STANDARDS.md) for detailed coding rules.
 
-```bash
-# Add to ~/.zshrc or ~/.bashrc:
-alias scripts-update="git -C ~/projects/scripts pull --ff-only"
-```
+---
 
-Then run `scripts-update` anytime to pull the latest changes.
+## Shell Completions (Tab Key)
+
+Tab completion for command names works out-of-the-box in all shells (`sh`, `bash`, `zsh`, `fish`) because binaries live in `$PATH`.
+
+Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are installed automatically for:
+* **Bash:** Installed to `~/.local/share/bash-completion/completions/` (or `/usr/share/bash-completion/completions/`)
+* **Zsh:** Installed to `~/.local/share/zsh/site-functions/` (or `/usr/share/zsh/site-functions/`)
+
+---
+
+## Script Catalog
+
+| Command | Source Path | Category | Description | Runtime / Dependencies |
+| :--- | :--- | :--- | :--- | :--- |
+| `scripts` | `scripts` | **Manager** | CLI package manager for the scripts ecosystem. | Bash |
+| `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
+| `sign-image` | `media/sign_image.py` | **Media** | Signs images with C2PA manifests, DWT steganographic marks, and OpenTimestamps. | Python $\ge$ 3.11, `uv` |

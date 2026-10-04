@@ -1,0 +1,9 @@
+# Bash completion for setup-user
+_setup_user_completions() {
+    local cur
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "-h --help" -- "$cur") )
+    fi
+}
+complete -F _setup_user_completions setup-user

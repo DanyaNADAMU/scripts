@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Script:      scripts
+# Category:    manager
+# Description: Unified manager for the nada.mu personal utilities ecosystem.
+# Target:      Linux / macOS
+# Usage:       scripts [command] [options]
+# ==============================================================================
+set -euo pipefail
+
+GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
+VERSION="1.0.0"
+
+# Determine execution context (local repository vs remote/standalone)
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+REPO_DIR="$(cd "$(dirname "$SELF_PATH")" 2>/dev/null && pwd || echo "")"
+
+if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/manifest.txt" ]; then
+    IS_LOCAL_REPO=true
+else
+    IS_LOCAL_REPO=false
+    REPO_DIR=""
+fi
+
+# ------------------------------------------------------------------------------
+# Helpers: I/O and Paths
+# ------------------------------------------------------------------------------
+log_info()  { echo -e "  \033[1;34m[i]\033[0m $*"; }
+log_ok()    { echo -e "  \033[1;32m[✓]\033[0m $*"; }
+log_warn()  { echo -e "  \033[1;33m[!]\033[0m $*"; }
+log_err()   { echo -e "  \033[1;31m[✗]\033[0m $*" >&2; }
+log_head()  { echo -e "\n\033[1;36m==>\033[0m \033[1m$*\033[0m"; }
+
+read_input() {
+    local prompt="$1"
+    local default="$2"
+    local var_name="$3"
+    local reply=""
+
+    if [ -t 0 ]; then
+        read -r -p "$prompt [$default]: " reply || true
+    elif [ -c /dev/tty ]; then
+        read -r -p "$prompt [$default]: " reply < /dev/tty 2>/dev/tty || true
+    else
+        reply=""
+    fi
+    reply="${reply:-$default}"
+    eval "$var_name=\"$reply\""
+}
+
+get_sha256() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Scope & Path Configuration
+# ------------------------------------------------------------------------------
+set_scope_paths() {
+    local scope="$1"
+    if [ "$scope" = "system" ]; then
+        BIN_DIR="/usr/local/bin"
+        MAN_DIR="/usr/local/share/man/man1"
+        BASH_COMP_DIR="/usr/share/bash-completion/completions"
+        ZSH_COMP_DIR="/usr/share/zsh/site-functions"
+        STATE_DIR="/var/lib/scripts"
+        NEED_SUDO=true
+    else
+        BIN_DIR="${HOME}/.local/bin"
+        MAN_DIR="${HOME}/.local/share/man/man1"
+        BASH_COMP_DIR="${HOME}/.local/share/bash-completion/completions"
+        ZSH_COMP_DIR="${HOME}/.local/share/zsh/site-functions"
+        STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/scripts"
+        NEED_SUDO=false
+    fi
+}
+
+ensure_write_access() {
+    local dir="$1"
+    if [ ! -d "$dir" ]; then
+        if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+            sudo mkdir -p "$dir"
+        else
+            mkdir -p "$dir"
+        fi
+    fi
+}
+
+safe_copy_or_link() {
+    local src="$1"
+    local dst="$2"
+    local mode="$3" # "link" or "copy"
+    local as_root="${4:-false}"
+
+    local cmd_prefix=""
+    if [ "$as_root" = true ] && [ "$EUID" -ne 0 ]; then
+        cmd_prefix="sudo"
+    fi
+
+    if [ "$mode" = "link" ]; then
+        $cmd_prefix ln -sf "$src" "$dst"
+    else
+        $cmd_prefix cp -f "$src" "$dst"
+    fi
+    $cmd_prefix chmod +x "$dst" 2>/dev/null || true
+}
+
+fetch_file() {
+    local rel_path="$1"
+    local dest_file="$2"
+
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        cp -f "$REPO_DIR/$rel_path" "$dest_file"
+    else
+        curl -fsSL "$GITHUB_RAW/$rel_path" -o "$dest_file"
+    fi
+}
+
+load_manifest() {
+    local tmp_manifest="$1"
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        cp -f "$REPO_DIR/manifest.txt" "$tmp_manifest"
+    else
+        if ! curl -fsSL "$GITHUB_RAW/manifest.txt" -o "$tmp_manifest"; then
+            log_err "Failed to download manifest.txt from upstream repository."
+            exit 1
+        fi
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Subcommand: list
+# ------------------------------------------------------------------------------
+cmd_list() {
+    local scope="${1:-user}"
+    set_scope_paths "$scope"
+
+    local tmp_m
+    tmp_m="$(mktemp)"
+    load_manifest "$tmp_m"
+
+    log_head "Available and Installed Scripts (Scope: $scope -> $BIN_DIR)"
+    printf "  %-14s %-10s %-12s %s\n" "COMMAND" "CATEGORY" "STATUS" "DESCRIPTION"
+    printf "  %-14s %-10s %-12s %s\n" "-------" "--------" "------" "-----------"
+
+    while IFS=: read -r src_path cmd_name category desc || [ -n "$src_path" ]; do
+        [[ "$src_path" =~ ^#.*$ ]] && continue
+        [ -z "$src_path" ] && continue
+
+        local status="Available"
+        if [ -f "$BIN_DIR/$cmd_name" ]; then
+            if [ -L "$BIN_DIR/$cmd_name" ]; then
+                status="Linked"
+            else
+                status="Installed"
+            fi
+        fi
+
+        printf "  \033[1m%-14s\033[0m %-10s %-12s %s\n" "$cmd_name" "$category" "$status" "$desc"
+    done < "$tmp_m"
+
+    rm -f "$tmp_m"
+    echo ""
+}
+
+# ------------------------------------------------------------------------------
+# Subcommand: install & update
+# ------------------------------------------------------------------------------
+cmd_install() {
+    local scope="user"
+    local category="all"
+    local auto_yes=false
+    local is_update=false
+    local method=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scope) scope="$2"; shift 2 ;;
+            --category) category="$2"; shift 2 ;;
+            -y|--yes) auto_yes=true; shift ;;
+            --update) is_update=true; shift ;;
+            --method) method="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    # If running interactively without explicit args, run wizard
+    if [ "$auto_yes" = false ] && [ -t 0 ] || ([ "$auto_yes" = false ] && [ -c /dev/tty ]); then
+        echo -e "\033[1;36m==>\033[0m \033[1mscripts installer\033[0m (v$VERSION)"
+        
+        local choice_scope=""
+        read_input "Install scope: [1] User (~/.local/bin) [2] System (/usr/local/bin)" "1" choice_scope
+        if [ "$choice_scope" = "2" ] || [ "$choice_scope" = "system" ]; then
+            scope="system"
+        else
+            scope="user"
+        fi
+
+        local choice_cat=""
+        read_input "Category: [1] all [2] server [3] desktop [4] media" "1" choice_cat
+        case "$choice_cat" in
+            2|server) category="server" ;;
+            3|desktop) category="desktop" ;;
+            4|media) category="media" ;;
+            *) category="all" ;;
+        esac
+
+        if [ "$IS_LOCAL_REPO" = true ] && [ -z "$method" ]; then
+            local choice_meth=""
+            read_input "Installation method: [1] Symlink (recommended for dev) [2] Copy" "1" choice_meth
+            if [ "$choice_meth" = "2" ] || [ "$choice_meth" = "copy" ]; then
+                method="copy"
+            else
+                method="link"
+            fi
+        fi
+    fi
+
+    if [ -z "$method" ]; then
+        if [ "$IS_LOCAL_REPO" = true ]; then
+            method="link"
+        else
+            method="copy"
+        fi
+    fi
+
+    set_scope_paths "$scope"
+
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        log_info "System scope requested. Sudo privileges will be used."
+        sudo -v || { log_err "Sudo authorization failed."; exit 1; }
+    fi
+
+    ensure_write_access "$BIN_DIR"
+    ensure_write_access "$MAN_DIR"
+    ensure_write_access "$BASH_COMP_DIR"
+    ensure_write_access "$ZSH_COMP_DIR"
+    ensure_write_access "$STATE_DIR"
+
+    local current_manifest
+    current_manifest="$(mktemp)"
+    load_manifest "$current_manifest"
+
+    local prev_manifest="$STATE_DIR/manifest.txt"
+    touch "$prev_manifest"
+
+    log_head "Installing/Updating utilities in $BIN_DIR (Category: $category)..."
+
+    local count_installed=0
+    local count_updated=0
+    local count_unchanged=0
+
+    while IFS=: read -r src_path cmd_name script_cat desc || [ -n "$src_path" ]; do
+        [[ "$src_path" =~ ^#.*$ ]] && continue
+        [ -z "$src_path" ] && continue
+
+        if [ "$category" != "all" ] && [ "$category" != "$script_cat" ]; then
+            continue
+        fi
+
+        local target_bin="$BIN_DIR/$cmd_name"
+        local old_sha
+        old_sha="$(get_sha256 "$target_bin")"
+
+        # Install script
+        if [ "$IS_LOCAL_REPO" = true ]; then
+            safe_copy_or_link "$REPO_DIR/$src_path" "$target_bin" "$method" "$NEED_SUDO"
+        else
+            local tmp_dl
+            tmp_dl="$(mktemp)"
+            fetch_file "$src_path" "$tmp_dl"
+            if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+                sudo cp -f "$tmp_dl" "$target_bin"
+                sudo chmod +x "$target_bin"
+            else
+                cp -f "$tmp_dl" "$target_bin"
+                chmod +x "$target_bin"
+            fi
+            rm -f "$tmp_dl"
+        fi
+
+        local new_sha
+        new_sha="$(get_sha256 "$target_bin")"
+
+        if [ -z "$old_sha" ]; then
+            log_ok "$cmd_name : Installed ($script_cat)"
+            count_installed=$((count_installed + 1))
+        elif [ "$old_sha" != "$new_sha" ]; then
+            log_ok "$cmd_name : Updated (${old_sha:0:7} -> ${new_sha:0:7})"
+            count_updated=$((count_updated + 1))
+        else
+            log_info "$cmd_name : Up to date"
+            count_unchanged=$((count_unchanged + 1))
+        fi
+
+        # Install Man Page if present
+        local man_src="docs/man/man1/${cmd_name}.1"
+        local man_dst="$MAN_DIR/${cmd_name}.1"
+        if [ "$IS_LOCAL_REPO" = true ] && [ -f "$REPO_DIR/$man_src" ]; then
+            safe_copy_or_link "$REPO_DIR/$man_src" "$man_dst" "copy" "$NEED_SUDO"
+        elif [ "$IS_LOCAL_REPO" = false ]; then
+            local tmp_man
+            tmp_man="$(mktemp)"
+            if curl -fsSL "$GITHUB_RAW/$man_src" -o "$tmp_man" 2>/dev/null; then
+                if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+                    sudo cp -f "$tmp_man" "$man_dst"
+                else
+                    cp -f "$tmp_man" "$man_dst"
+                fi
+            fi
+            rm -f "$tmp_man"
+        fi
+
+        # Install Shell Completions if present
+        local bash_src="completions/bash/${cmd_name}"
+        local zsh_src="completions/zsh/_${cmd_name}"
+        if [ "$IS_LOCAL_REPO" = true ]; then
+            [ -f "$REPO_DIR/$bash_src" ] && safe_copy_or_link "$REPO_DIR/$bash_src" "$BASH_COMP_DIR/$cmd_name" "copy" "$NEED_SUDO"
+            [ -f "$REPO_DIR/$zsh_src" ] && safe_copy_or_link "$REPO_DIR/$zsh_src" "$ZSH_COMP_DIR/_$cmd_name" "copy" "$NEED_SUDO"
+        fi
+    done < "$current_manifest"
+
+    # Install the 'scripts' manager itself into the target bin directory
+    local scripts_bin="$BIN_DIR/scripts"
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        safe_copy_or_link "$SELF_PATH" "$scripts_bin" "$method" "$NEED_SUDO"
+    else
+        local tmp_self
+        tmp_self="$(mktemp)"
+        fetch_file "scripts" "$tmp_self"
+        if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+            sudo cp -f "$tmp_self" "$scripts_bin"
+            sudo chmod +x "$scripts_bin"
+        else
+            cp -f "$tmp_self" "$scripts_bin"
+            chmod +x "$scripts_bin"
+        fi
+        rm -f "$tmp_self"
+    fi
+
+    # Check for Orphaned/Deprecated scripts
+    if [ -f "$prev_manifest" ]; then
+        while IFS=: read -r p_src p_cmd p_cat p_desc || [ -n "$p_src" ]; do
+            [[ "$p_src" =~ ^#.*$ ]] && continue
+            [ -z "$p_src" ] && continue
+
+            # If not in current manifest anymore
+            if ! grep -q ":$p_cmd:" "$current_manifest"; then
+                if [ -f "$BIN_DIR/$p_cmd" ]; then
+                    log_warn "Deprecated utility detected: '$p_cmd' (removed from upstream repository)."
+                    local del_reply="y"
+                    if [ "$auto_yes" = false ]; then
+                        read_input "Remove $BIN_DIR/$p_cmd? (y/n)" "y" del_reply
+                    fi
+                    if [[ "$del_reply" =~ ^[Yy]$ ]]; then
+                        if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+                            sudo rm -f "$BIN_DIR/$p_cmd" "$MAN_DIR/${p_cmd}.1" "$BASH_COMP_DIR/$p_cmd" "$ZSH_COMP_DIR/_$p_cmd"
+                        else
+                            rm -f "$BIN_DIR/$p_cmd" "$MAN_DIR/${p_cmd}.1" "$BASH_COMP_DIR/$p_cmd" "$ZSH_COMP_DIR/_$p_cmd"
+                        fi
+                        log_ok "Removed deprecated: $p_cmd"
+                    fi
+                fi
+            fi
+        done < "$prev_manifest"
+    fi
+
+    # Save state manifest
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        sudo cp -f "$current_manifest" "$prev_manifest"
+    else
+        cp -f "$current_manifest" "$prev_manifest"
+    fi
+    rm -f "$current_manifest"
+
+    log_head "Summary"
+    echo "  Installed: $count_installed | Updated: $count_updated | Unchanged: $count_unchanged"
+    echo "  Binary Path: $BIN_DIR"
+
+    if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+        log_warn "$BIN_DIR is NOT currently in your PATH environment variable."
+        echo "  Add it to your shell profile (~/.zshrc or ~/.bashrc):"
+        echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    else
+        log_ok "PATH check passed ($BIN_DIR is active)."
+    fi
+    echo ""
+}
+
+# ------------------------------------------------------------------------------
+# Subcommand: uninstall
+# ------------------------------------------------------------------------------
+cmd_uninstall() {
+    local scope="user"
+    local auto_yes=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scope) scope="$2"; shift 2 ;;
+            -y|--yes) auto_yes=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    set_scope_paths "$scope"
+    local manifest_file="$STATE_DIR/manifest.txt"
+
+    if [ "$auto_yes" = false ]; then
+        local confirm=""
+        read_input "Are you sure you want to uninstall all scripts from $BIN_DIR? (y/n)" "n" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    fi
+
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        sudo -v
+    fi
+
+    log_head "Uninstalling utilities from $BIN_DIR..."
+
+    if [ -f "$manifest_file" ]; then
+        while IFS=: read -r src_path cmd_name cat desc || [ -n "$src_path" ]; do
+            [[ "$src_path" =~ ^#.*$ ]] && continue
+            [ -z "$src_path" ] && continue
+
+            if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+                sudo rm -f "$BIN_DIR/$cmd_name" "$MAN_DIR/${cmd_name}.1" "$BASH_COMP_DIR/$cmd_name" "$ZSH_COMP_DIR/_$cmd_name"
+            else
+                rm -f "$BIN_DIR/$cmd_name" "$MAN_DIR/${cmd_name}.1" "$BASH_COMP_DIR/$cmd_name" "$ZSH_COMP_DIR/_$cmd_name"
+            fi
+            log_ok "Removed: $cmd_name"
+        done < "$manifest_file"
+
+        if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+            sudo rm -rf "$STATE_DIR" "$BIN_DIR/scripts"
+        else
+            rm -rf "$STATE_DIR" "$BIN_DIR/scripts"
+        fi
+    else
+        log_warn "No state manifest found at $manifest_file. Cleaning known commands..."
+        rm -f "$BIN_DIR/setup-user" "$BIN_DIR/scripts"
+    fi
+
+    log_ok "Uninstallation complete."
+}
+
+# ------------------------------------------------------------------------------
+# Main Dispatcher
+# ------------------------------------------------------------------------------
+show_help() {
+    cat << EOF
+Usage: scripts [COMMAND] [OPTIONS]
+
+Unified manager for the nada.mu personal utilities ecosystem.
+
+Commands:
+  install      Install or link utilities into PATH (interactive by default)
+  update       Sync and update installed utilities, checking for changes
+  list         List all available utilities and their current install status
+  uninstall    Remove installed utilities, man pages, and completions
+  help         Display this help message
+
+Options:
+  --scope SCOPE        Target scope: 'user' (~/.local/bin) or 'system' (/usr/local/bin)
+  --category CAT       Filter category: 'all', 'server', 'desktop', 'media'
+  -y, --yes            Non-interactive mode; accept all defaults
+  -h, --help           Show this help message
+
+Examples:
+  scripts install                         # Interactive installer wizard
+  scripts install --scope user --all -y   # Unattended install to ~/.local/bin
+  sudo scripts install --scope system -y  # Unattended install to /usr/local/bin
+  scripts update                          # Update all installed tools and report changes
+  scripts list                            # View available tools and statuses
+EOF
+}
+
+ACTION="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+case "$ACTION" in
+    install)
+        cmd_install "$@"
+        ;;
+    update)
+        # If in local git repo, pull first if possible
+        if [ "$IS_LOCAL_REPO" = true ] && [ -d "$REPO_DIR/.git" ]; then
+            log_head "Pulling latest changes from git repository..."
+            git -C "$REPO_DIR" pull --ff-only || log_warn "Git pull failed or offline; proceeding with local files."
+        fi
+        cmd_install --update "$@"
+        ;;
+    list)
+        cmd_list "$@"
+        ;;
+    uninstall)
+        cmd_uninstall "$@"
+        ;;
+    -h|--help|help)
+        show_help
+        exit 0
+        ;;
+    "")
+        # No args: launch interactive installer
+        cmd_install
+        ;;
+    *)
+        log_err "Unknown command: '$ACTION'"
+        show_help
+        exit 1
+        ;;
+esac
