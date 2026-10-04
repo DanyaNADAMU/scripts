@@ -7,7 +7,7 @@
 set -euo pipefail
 
 GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")"
 
 ARGS=()
 if [ $# -eq 0 ]; then
