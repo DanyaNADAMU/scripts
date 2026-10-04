@@ -3,8 +3,9 @@
 _sign_image() {
     local -a commands
     commands=(
-        'sign:Sign an image with C2PA and invisible watermark'
-        'verify:Inspect and verify C2PA & frequency watermarks'
+        'sign:Sign an image with C2PA, watermark and OpenTimestamps'
+        'verify:Inspect and verify C2PA, watermarks & OpenTimestamps'
+        'stamp:Anchor or upgrade media files in Bitcoin blockchain'
         'credentials:View, export, or import signing credentials'
         'keygen:Generate or regenerate C2PA signing credentials'
     )
@@ -31,6 +32,7 @@ _sign_image() {
                         '(-w --watermark)'{-w,--watermark}'[Custom watermark text]:text:' \
                         '--no-watermark[Disable invisible DWT-DCT watermark]' \
                         '--no-c2pa[Disable C2PA manifest signing]' \
+                        '--stamp[Anchor signed file in Bitcoin blockchain via OpenTimestamps]' \
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark permutation]:passphrase:' \
                         '--key[Custom EC private key PEM]:key file:_files' \
                         '--cert[Custom X.509 certificate chain PEM]:cert file:_files' \
@@ -40,9 +42,18 @@ _sign_image() {
                 verify)
                     _arguments \
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark extraction]:passphrase:' \
+                        '--ots[Explicit OpenTimestamps proof file]:ots file:_files -g "*.ots"' \
                         '--json[Output raw verification report in JSON]' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
                         '*:target media:_files'
+                    ;;
+                stamp)
+                    _arguments \
+                        '--upgrade[Upgrade pending .ots proof against Bitcoin calendars]' \
+                        '--wait[Wait until confirmation block is available]' \
+                        '(-f --force)'{-f,--force}'[Overwrite existing .ots file]' \
+                        '(-h --help)'{-h,--help}'[Display help message]' \
+                        '*:file to stamp:_files'
                     ;;
                 credentials)
                     _arguments \

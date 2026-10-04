@@ -8,19 +8,21 @@
 #     "numpy>=1.26.0",
 #     "pywavelets>=1.6.0",
 #     "scipy>=1.13.0",
+#     "opentimestamps-client>=0.7.1",
 # ]
 # ///
 # ==============================================================================
 # Script:      sign_image.py
 # Category:    media
-# Description: Multi-layer image signing: C2PA Content Credentials & DWT-DCT Steganography.
+# Description: Multi-layer media signing: C2PA Content Credentials, DWT-DCT Steganography & OpenTimestamps.
 # Target:      Linux / macOS
 # Requires:    python >= 3.11, uv
-# Usage:       sign-image [sign|verify|credentials|keygen] [options] <file>
+# Usage:       sign-image [sign|verify|stamp|credentials|keygen] [options] <file>
 # ==============================================================================
 from __future__ import annotations
 
 import argparse
+import binascii
 import datetime
 import hashlib
 import io
@@ -45,6 +47,12 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import c2pa
 
+import otsclient.args
+import otsclient.cmds
+from opentimestamps.core.notary import BitcoinBlockHeaderAttestation, PendingAttestation
+from opentimestamps.core.serialize import StreamDeserializationContext
+from otsclient.cmds import DetachedTimestampFile
+
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "nadamu"
 DEFAULT_KEY_DIR = DEFAULT_CONFIG_DIR / "c2pa"
 DEFAULT_KEY_PATH = DEFAULT_KEY_DIR / "es256_private.key"
@@ -57,7 +65,7 @@ DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 DEFAULT_WATERMARK = "NADAMU"
 APP_NAME = "sign-image"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -103,6 +111,7 @@ def load_config() -> dict[str, Any]:
         "watermark_text": DEFAULT_WATERMARK,
         "watermark_delta": 35.0,
         "watermark_repeats": 3,
+        "auto_stamp": False,
     }
 
     if DEFAULT_CONFIG_FILE.is_file():
@@ -500,7 +509,145 @@ def manage_credentials(
 
 
 # ------------------------------------------------------------------------------
-# Combined Pipeline: Sign & Inspect (Stage 1 + Stage 2)
+# Stage 3: OpenTimestamps Blockchain Anchoring (Bitcoin)
+# ------------------------------------------------------------------------------
+DEFAULT_CALENDARS = [
+    "https://a.pool.opentimestamps.org",
+    "https://b.pool.opentimestamps.org",
+    "https://a.pool.eternitywall.com",
+    "https://ots.btc.catallaxy.com",
+]
+
+
+def stamp_media_file(
+    target_file: Path,
+    wait: bool = False,
+    force: bool = False,
+) -> Path:
+    """Submits file SHA-256 to OpenTimestamps Bitcoin calendar pools and writes .ots proof."""
+    if not target_file.is_file():
+        log_err(f"File not found for timestamping: {target_file}")
+        sys.exit(1)
+
+    ots_path = target_file.with_name(f"{target_file.name}.ots")
+    if ots_path.is_file():
+        if force:
+            backup_path = ots_path.with_suffix(".ots.bak")
+            shutil.copyfile(ots_path, backup_path)
+            ots_path.unlink()
+            log_info(f"Existing timestamp backed up to {backup_path.name}")
+        else:
+            log_warn(f"Timestamp proof already exists: {ots_path.name} (use --force to overwrite)")
+            return ots_path
+
+    log_info(f"Stage 3: Anchoring {target_file.name} in Bitcoin blockchain (OpenTimestamps)...")
+
+    cli_args = ["stamp"]
+    if wait:
+        cli_args.append("--wait")
+    cli_args.append(str(target_file))
+
+    try:
+        parsed_args = otsclient.args.parse_ots_args(cli_args)
+        parsed_args.cmd_func(parsed_args)
+        log_ok(f"Stage 3 complete: Blockchain proof generated: {ots_path.name}")
+        return ots_path
+    except Exception as e:
+        log_err(f"OpenTimestamps stamping failed: {e}")
+        raise
+
+
+def upgrade_ots_file(target_file: Path) -> bool:
+    """Upgrades a pending .ots proof file against calendar servers once Bitcoin block confirms."""
+    ots_path = target_file if target_file.name.endswith(".ots") else target_file.with_name(f"{target_file.name}.ots")
+    if not ots_path.is_file():
+        log_err(f"Timestamp file not found: {ots_path}")
+        sys.exit(1)
+
+    log_head(f"Upgrading OpenTimestamps Proof: {ots_path.name}")
+    cli_args = ["upgrade", str(ots_path)]
+
+    try:
+        parsed_args = otsclient.args.parse_ots_args(cli_args)
+        try:
+            parsed_args.cmd_func(parsed_args)
+            log_ok("Timestamp upgraded successfully!")
+            return True
+        except SystemExit as se:
+            if se.code == 0:
+                log_ok("Timestamp confirmed complete in Bitcoin blockchain!")
+                return True
+            else:
+                log_warn("Timestamp still pending confirmation in Bitcoin blockchain (calendars batch within 1-2 hours).")
+                return False
+    except Exception as e:
+        log_err(f"Upgrade failed: {e}")
+        return False
+
+
+def inspect_ots_proof(target_file: Path, ots_path: Path | None = None) -> dict[str, Any] | None:
+    """Inspects and verifies an OpenTimestamps proof file for a media asset."""
+    candidate_ots = ots_path
+    if candidate_ots is None:
+        p1 = target_file.with_name(f"{target_file.name}.ots")
+        p2 = target_file.with_suffix(".ots")
+        if p1.is_file():
+            candidate_ots = p1
+        elif p2.is_file():
+            candidate_ots = p2
+
+    if candidate_ots is None or not candidate_ots.is_file():
+        return None
+
+    try:
+        with open(candidate_ots, "rb") as f:
+            ctx = StreamDeserializationContext(f)
+            dt = DetachedTimestampFile.deserialize(ctx)
+
+        ots_hash = binascii.hexlify(dt.file_digest).decode()
+        algo = getattr(dt.file_hash_op, "HASHLIB_NAME", "sha256")
+
+        h = hashlib.new(algo)
+        with open(target_file, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        actual_hash = h.hexdigest()
+
+        hash_matches = (ots_hash.lower() == actual_hash.lower())
+
+        btc_blocks = []
+        pending_calendars = []
+        for _, att in dt.timestamp.all_attestations():
+            if isinstance(att, BitcoinBlockHeaderAttestation):
+                btc_blocks.append(att.height)
+            elif isinstance(att, PendingAttestation):
+                pending_calendars.append(att.uri)
+
+        status = "unknown"
+        if not hash_matches:
+            status = "mismatch"
+        elif btc_blocks:
+            status = "confirmed"
+        elif pending_calendars:
+            status = "pending"
+
+        return {
+            "ots_path": str(candidate_ots),
+            "algorithm": algo,
+            "ots_digest": ots_hash,
+            "actual_digest": actual_hash,
+            "hash_matches": hash_matches,
+            "btc_blocks": btc_blocks,
+            "pending_calendars": pending_calendars,
+            "status": status,
+        }
+    except Exception as e:
+        log_warn(f"OpenTimestamps inspection warning: {e}")
+        return None
+
+
+# ------------------------------------------------------------------------------
+# Combined Pipeline: Sign & Inspect (Stage 1 + Stage 2 + Stage 3)
 # ------------------------------------------------------------------------------
 def process_signing(
     input_path: Path,
@@ -513,11 +660,12 @@ def process_signing(
     watermark_payload: str | None = None,
     no_watermark: bool = False,
     no_c2pa: bool = False,
+    stamp: bool = False,
     secret: str | None = None,
     key_path: Path | None = None,
     cert_path: Path | None = None,
 ) -> None:
-    """Executes multi-layer signing (DWT-DCT steganography + C2PA Content Credentials)."""
+    """Executes multi-layer signing (DWT-DCT steganography + C2PA Credentials + OpenTimestamps)."""
     if not input_path.is_file():
         log_err(f"Input file not found: {input_path}")
         sys.exit(1)
@@ -557,10 +705,9 @@ def process_signing(
                     repeats=wm_repeats,
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                # Preserve format
                 save_fmt = pil_img.format or "PNG"
                 wm_img.save(output_path, format=save_fmt)
-                log_ok(f"Stage 2 complete: Watermark embedded into frequency spectrum.")
+                log_ok("Stage 2 complete: Watermark embedded into frequency spectrum.")
         except Exception as e:
             log_err(f"Steganographic watermarking failed: {e}")
             sys.exit(1)
@@ -622,6 +769,13 @@ def process_signing(
     else:
         log_info("Stage 1: C2PA manifest signing disabled (--no-c2pa).")
 
+    # Stage 3: OpenTimestamps Blockchain Anchoring
+    if stamp or cfg.get("auto_stamp", False):
+        try:
+            stamp_media_file(output_path, force=True)
+        except Exception as e:
+            log_warn(f"Stage 3 (OpenTimestamps) encountered an issue: {e}")
+
     log_ok(f"Ready: {output_path} ({output_path.stat().st_size:,} bytes)\n")
 
 
@@ -629,13 +783,15 @@ def inspect_image(
     image_path: Path,
     as_json: bool = False,
     secret: str | None = None,
+    ots_path: Path | None = None,
 ) -> None:
-    """Verifies both C2PA Content Credentials and DWT-DCT invisible watermarks."""
+    """Verifies C2PA Content Credentials, DWT-DCT invisible watermarks, and OpenTimestamps."""
     if not image_path.is_file():
         log_err(f"File not found: {image_path}")
         sys.exit(1)
 
-    log_head(f"Media Verification: {image_path.name}")
+    if not as_json:
+        log_head(f"Media Verification: {image_path.name}")
 
     # 1. Verify C2PA Manifest (Stage 1)
     c2pa_data: dict[str, Any] | None = None
@@ -663,12 +819,16 @@ def inspect_image(
     except Exception as e:
         log_warn(f"Watermark scan error: {e}")
 
+    # 3. Verify OpenTimestamps Proof (Stage 3)
+    ots_data = inspect_ots_proof(image_path, ots_path=ots_path)
+
     if as_json:
         result = {
             "file": str(image_path),
             "c2pa": c2pa_data,
             "c2pa_validation": c2pa_val_str,
             "invisible_watermark": detected_wm,
+            "opentimestamps": ots_data,
         }
         print(json.dumps(result, indent=2))
         return
@@ -700,19 +860,54 @@ def inspect_image(
     else:
         print(f"  {C_YELLOW}[ ] No watermark detected (or encoded with a different secret key).{C_RESET}")
 
-    echo_summary(c2pa_val_str == "Valid", bool(detected_wm))
+    print(f"\n  {C_BOLD}--- LEVEL 3: OpenTimestamps (Bitcoin Blockchain) ---{C_RESET}")
+    if ots_data:
+        proof_name = Path(ots_data["ots_path"]).name
+        print(f"  {C_BOLD}Proof File:{C_RESET}   {proof_name}")
+        print(f"  {C_BOLD}Target Hash:{C_RESET}  {ots_data['ots_digest']} ({ots_data['algorithm']})")
+        if ots_data["hash_matches"]:
+            print(f"  {C_GREEN}[✓] File Hash:    MATCH (Content verified against timestamp).{C_RESET}")
+        else:
+            print(f"  {C_RED}[✗] File Hash:    MISMATCH (File has been altered since timestamping!).{C_RESET}")
+
+        if ots_data["status"] == "confirmed":
+            blocks_str = ", ".join(f"#{b}" for b in ots_data["btc_blocks"])
+            print(f"  {C_GREEN}[✓] Blockchain:   CONFIRMED in Bitcoin Block(s): {blocks_str}{C_RESET}")
+        elif ots_data["status"] == "pending":
+            print(f"  {C_BLUE}[i] Blockchain:   PENDING confirmation (aggregated across {len(ots_data['pending_calendars'])} calendars).{C_RESET}")
+            print(f"                    Run '{C_BOLD}sign-image stamp --upgrade {proof_name}{C_RESET}' once mined.")
+        elif ots_data["status"] == "mismatch":
+            print(f"  {C_RED}[✗] Blockchain:   UNVERIFIED due to file hash mismatch.{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}[ ] No OpenTimestamps proof found (<name>.ots).{C_RESET}")
+
+    echo_summary(
+        c2pa_val_str == "Valid",
+        bool(detected_wm),
+        ots_data["status"] if ots_data else None,
+    )
 
 
-def echo_summary(has_c2pa: bool, has_wm: bool) -> None:
+def echo_summary(has_c2pa: bool, has_wm: bool, ots_status: str | None = None) -> None:
     print(f"\n  {C_BOLD}Summary Verdict:{C_RESET}")
-    if has_c2pa and has_wm:
-        print(f"    {C_GREEN}★ Full Attestation Verified (C2PA Manifest + Invisible Watermark).{C_RESET}\n")
+    ots_valid = (ots_status in ("confirmed", "pending"))
+
+    if has_c2pa and has_wm and ots_valid:
+        print(f"    {C_GREEN}★ Full Triple-Layer Attestation Verified (C2PA + Steganography + OpenTimestamps).{C_RESET}\n")
+    elif has_c2pa and has_wm:
+        print(f"    {C_GREEN}★ Dual-Layer Provenance Verified (C2PA Manifest + Invisible Watermark).{C_RESET}\n")
+    elif has_c2pa and ots_valid:
+        print(f"    {C_GREEN}✓ C2PA Authenticity & Blockchain Timestamp Verified.{C_RESET}\n")
+    elif has_wm and ots_valid:
+        print(f"    {C_YELLOW}✓ Provenance Proven via Frequency Watermark & Blockchain Timestamp (Metadata was stripped).{C_RESET}\n")
     elif has_c2pa:
-        print(f"    {C_GREEN}✓ C2PA Authenticity Verified (No watermark detected).{C_RESET}\n")
+        print(f"    {C_GREEN}✓ C2PA Authenticity Verified (No watermark or blockchain timestamp).{C_RESET}\n")
     elif has_wm:
         print(f"    {C_YELLOW}✓ Provenance Proven via Frequency Watermark (Metadata was stripped).{C_RESET}\n")
+    elif ots_valid:
+        print(f"    {C_BLUE}✓ Blockchain Existence Verified at Timestamp (No C2PA or watermark).{C_RESET}\n")
     else:
-        print(f"    {C_RED}✗ Unverified: No cryptographic signatures or watermarks found.{C_RESET}\n")
+        print(f"    {C_RED}✗ Unverified: No cryptographic signatures, watermarks, or timestamps found.{C_RESET}\n")
 
 
 # ------------------------------------------------------------------------------
@@ -721,17 +916,20 @@ def echo_summary(has_c2pa: bool, has_wm: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sign-image",
-        description="Multi-layer media signing using C2PA Content Credentials & DWT-DCT Steganography.",
+        description="Multi-layer media signing: C2PA Content Credentials, DWT-DCT Steganography & OpenTimestamps.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sign-image sign image.png                       # Sign with both C2PA and invisible watermark
-  sign-image sign -o signed.jpg raw.jpg           # Sign and write to signed.jpg
+  sign-image sign image.png                       # Sign with C2PA and invisible watermark
+  sign-image sign --stamp image.png               # Sign with all 3 layers (C2PA + Watermark + OpenTimestamps)
+  sign-image sign -o signed.jpg raw.jpg           # Sign and write to custom destination
   sign-image sign --in-place banner.webp          # Embed signatures directly into file
   sign-image sign --no-watermark photo.jpg        # C2PA manifest only
   sign-image sign --no-c2pa photo.jpg             # Invisible watermark only
-  sign-image verify image_signed.png              # Inspect both C2PA and frequency watermark
+  sign-image verify image_signed.png              # Inspect all 3 attestation layers
   sign-image verify --json image_signed.png       # Print complete raw verification report in JSON
+  sign-image stamp photo.png                      # Anchor existing image into Bitcoin blockchain
+  sign-image stamp --upgrade photo.png.ots        # Upgrade pending timestamp to confirmed Bitcoin block
   sign-image credentials                          # View active certificate details and paths
   sign-image credentials --export                 # Export key and cert for Bitwarden backup
   sign-image keygen                               # Regenerate dedicated signing certificates
@@ -753,15 +951,24 @@ Examples:
     p_sign.add_argument("-w", "--watermark", type=str, help="Custom invisible watermark text (default: NADAMU)")
     p_sign.add_argument("--no-watermark", action="store_true", help="Disable invisible DWT-DCT watermark")
     p_sign.add_argument("--no-c2pa", action="store_true", help="Disable C2PA manifest signing")
+    p_sign.add_argument("--stamp", action="store_true", help="Anchor signed file in Bitcoin blockchain via OpenTimestamps")
     p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
 
     # Command: verify / inspect
-    p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA & frequency watermarks")
+    p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA, watermarks & OpenTimestamps")
     p_verify.add_argument("file", type=Path, help="Target media file to inspect")
+    p_verify.add_argument("--ots", type=Path, help="Path to custom or detached .ots proof file")
     p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
     p_verify.add_argument("--json", action="store_true", help="Output raw verification report in JSON")
+
+    # Command: stamp (standalone OpenTimestamps anchoring and upgrading)
+    p_stamp = subparsers.add_parser("stamp", help="Anchor or upgrade media files in Bitcoin blockchain (OpenTimestamps)")
+    p_stamp.add_argument("file", type=Path, help="Target media file or .ots proof file")
+    p_stamp.add_argument("--upgrade", action="store_true", help="Upgrade pending .ots proof against Bitcoin calendars")
+    p_stamp.add_argument("--wait", action="store_true", help="Wait until confirmation block is available")
+    p_stamp.add_argument("-f", "--force", action="store_true", help="Overwrite existing .ots file")
 
     # Command: credentials (view, export, import)
     p_cred = subparsers.add_parser("credentials", help="View, export, or import signing credentials (Bitwarden backup)")
@@ -776,7 +983,7 @@ Examples:
 
     # Handle shortcut: if first arg is a file or flag, default to 'sign' or 'verify'
     args_list = sys.argv[1:]
-    if args_list and args_list[0] not in ("sign", "verify", "credentials", "keygen", "-h", "--help"):
+    if args_list and args_list[0] not in ("sign", "verify", "stamp", "credentials", "keygen", "-h", "--help"):
         if any(arg == "--verify" for arg in args_list):
             args_list.remove("--verify")
             args_list.insert(0, "verify")
@@ -804,8 +1011,14 @@ Examples:
         log_ok(f"Key written:  {out_key}")
         log_ok(f"Cert written: {out_cert}")
 
+    elif args.command == "stamp":
+        if args.upgrade:
+            upgrade_ots_file(args.file)
+        else:
+            stamp_media_file(args.file, wait=args.wait, force=args.force)
+
     elif args.command == "verify":
-        inspect_image(args.file, as_json=args.json, secret=args.secret)
+        inspect_image(args.file, as_json=args.json, secret=args.secret, ots_path=args.ots)
 
     elif args.command == "sign":
         if args.in_place:
@@ -826,6 +1039,7 @@ Examples:
             watermark_payload=args.watermark,
             no_watermark=args.no_watermark,
             no_c2pa=args.no_c2pa,
+            stamp=args.stamp,
             secret=args.secret,
             key_path=args.key,
             cert_path=args.cert,
