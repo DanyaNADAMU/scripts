@@ -1,0 +1,25 @@
+# Bash completion for sign-image
+_sign_image_completions() {
+    local cur prev commands
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="sign verify keygen -h --help"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    case "$prev" in
+        -o|--output|--key|--cert)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+        *)
+            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description --key --cert --json -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff)" -- "$cur") )
+            return 0
+            ;;
+    esac
+}
+complete -F _sign_image_completions sign-image

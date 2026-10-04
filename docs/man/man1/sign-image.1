@@ -1,0 +1,49 @@
+.TH SIGN-IMAGE 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+sign-image \- sign and verify digital images with C2PA Content Credentials
+.SH SYNOPSIS
+.B sign-image
+[\fBsign\fR|\fBverify\fR|\fBkeygen\fR] [\fIoptions\fR] \fIfile\fR
+.SH DESCRIPTION
+\fBsign-image\fR embeds tamper-evident cryptographic provenance manifests (C2PA / Content Credentials)
+into digital images and multimedia assets (PNG, JPEG, WebP, AVIF, SVG, TIFF).
+.PP
+The embedded manifest binds the author's declared identity, domain policy, and creation metadata
+directly to the SHA-256 hash of the media asset. Any subsequent modification of pixels or metadata
+immediately invalidates the provenance signature.
+.SH COMMANDS
+.TP
+.B sign \fR[\fIoptions\fR] \fIfile\fR
+Signs an image with C2PA assertions. Automatically generates persistent ES256 signing credentials in
+\fB~/.config/nada/c2pa/\fR if no custom key/cert is supplied.
+.TP
+.B verify \fR[\fB\-\-json\fR] \fIfile\fR
+Inspects and verifies the embedded C2PA manifest. Checks pixel hash integrity and reports whether the asset
+remains untampered.
+.TP
+.B keygen \fR[\fB\-d\fR \fIdomain\fR]
+Generates or regenerates an ECDSA P-256 (ES256) private key and an X.509 certificate chain.
+.SH OPTIONS
+.TP
+.BR \-o ", " \-\-output " " \fIpath\fR
+Destination path for the signed image (default: \fI<name>_signed.<ext>\fR).
+.TP
+.B \-\-in-place
+Overwrites the source image directly with the signed version.
+.TP
+.BR \-t ", " \-\-title " " \fItitle\fR
+Title of the artwork or media file.
+.TP
+.BR \-a ", " \-\-author " " \fIauthor\fR
+Author name and contact information (default: \fBDanyaNADAMU <git@nada.mu>\fR).
+.TP
+.BR \-d ", " \-\-domain " " \fIdomain\fR
+Domain name associated with the signer certificate (default: \fBnada.mu\fR).
+.TP
+.B \-\-json
+Prints the full raw C2PA manifest in JSON format when verifying.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR scripts (1),
+.BR https://nada.mu/.well-known/security.txt

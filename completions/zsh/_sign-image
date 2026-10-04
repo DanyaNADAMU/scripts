@@ -1,0 +1,51 @@
+#compdef sign-image
+
+_sign_image() {
+    local -a commands
+    commands=(
+        'sign:Sign an image with C2PA Content Credentials'
+        'verify:Inspect and verify C2PA Content Credentials'
+        'keygen:Generate or regenerate C2PA signing credentials'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'sign-image command' commands
+            ;;
+        args)
+            case $words[1] in
+                sign)
+                    _arguments \
+                        '(-o --output)'{-o,--output}'[Destination path]:output file:_files' \
+                        '--in-place[Overwrite input file directly]' \
+                        '(-t --title)'{-t,--title}'[Media title]:title:' \
+                        '(-a --author)'{-a,--author}'[Author name and contact]:author:' \
+                        '(-d --domain)'{-d,--domain}'[Signing domain]:domain:' \
+                        '(-m --description)'{-m,--description}'[Custom action description]:desc:' \
+                        '--key[Custom EC private key PEM]:key file:_files' \
+                        '--cert[Custom X.509 certificate chain PEM]:cert file:_files' \
+                        '(-h --help)'{-h,--help}'[Display help message]' \
+                        '*:media file:_files -g "*.([pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[aA][vV][iI][fF]|[sS][vV][gG])"'
+                    ;;
+                verify)
+                    _arguments \
+                        '--json[Output raw manifest in JSON]' \
+                        '(-h --help)'{-h,--help}'[Display help message]' \
+                        '*:target media:_files'
+                    ;;
+                keygen)
+                    _arguments \
+                        '(-d --domain)'{-d,--domain}'[Domain name for certificates]:domain:' \
+                        '--out-dir[Destination directory for credentials]:directory:_files -/' \
+                        '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_sign_image "$@"
