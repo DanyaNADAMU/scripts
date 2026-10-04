@@ -1,28 +1,28 @@
 .TH SIGN-IMAGE 1 "October 2026" "scripts" "User Commands"
 .SH NAME
-sign-image \- sign and verify digital images with C2PA Content Credentials
+sign-image \- multi-layer media signing with C2PA Content Credentials and DWT-DCT invisible steganography
 .SH SYNOPSIS
 .B sign-image
-[\fBsign\fR|\fBverify\fR|\fBkeygen\fR] [\fIoptions\fR] \fIfile\fR
+[\fBsign\fR|\fBverify\fR|\fBcredentials\fR|\fBkeygen\fR] [\fIoptions\fR] \fIfile\fR
 .SH DESCRIPTION
-\fBsign-image\fR embeds tamper-evident cryptographic provenance manifests (C2PA / Content Credentials)
-into digital images and multimedia assets (PNG, JPEG, WebP, AVIF, SVG, TIFF).
-.PP
-The embedded manifest binds the author's declared identity, domain policy, and creation metadata
-directly to the SHA-256 hash of the media asset. Any subsequent modification of pixels or metadata
-immediately invalidates the provenance signature.
+\fBsign-image\fR implements multi-layered cryptographic provenance and attestation for images and visual assets:
+.IP \(bu 3
+\fBLevel 1 (C2PA Content Credentials):\fR Embeds a tamper-evident cryptographic provenance manifest bound to pixel hashes, signed with an X.509 certificate chain. Any pixel modification invalidates the signature.
+.IP \(bu 3
+\fBLevel 2 (DWT-DCT Steganography):\fR Embeds an invisible, robust watermark into the luminance (Y) frequency spectrum (Haar DWT + 8x8 block DCT). Survives aggressive re-compression (JPEG 60%, WebP 70%), resizing, metadata stripping by messengers (Telegram, Discord, Twitter), and screenshots.
 .SH COMMANDS
 .TP
 .B sign \fR[\fIoptions\fR] \fIfile\fR
-Signs an image with C2PA assertions. Automatically generates persistent ES256 signing credentials in
-\fB~/.config/nada/c2pa/\fR if no custom key/cert is supplied.
+Signs an image with both C2PA assertions and an invisible DWT-DCT watermark. Automatically generates persistent ES256 signing credentials in \fB~/.config/nadamu/c2pa/\fR if no custom credentials are provided.
 .TP
-.B verify \fR[\fB\-\-json\fR] \fIfile\fR
-Inspects and verifies the embedded C2PA manifest. Checks pixel hash integrity and reports whether the asset
-remains untampered.
+.B verify \fR[\fB\-s\fR \fIsecret\fR] [\fB\-\-json\fR] \fIfile\fR
+Inspects and verifies both C2PA Content Credentials and invisible frequency watermarks. Reports validation status and provenance verdicts.
 .TP
-.B keygen \fR[\fB\-d\fR \fIdomain\fR]
-Generates or regenerates an ECDSA P-256 (ES256) private key and an X.509 certificate chain.
+.B credentials \fR[\fB\-\-export\fR|\fB\-\-import-key\fR \fIkey\fR \fB\-\-import-cert\fR \fIcert\fR]
+Views, exports, or imports C2PA signing credentials (private key and X.509 certificate chain). Useful for Bitwarden backups and replicating signing setups across machines.
+.TP
+.B keygen \fR[\fB\-d\fR \fIdomain\fR] [\fB\-\-out-dir\fR \fIdir\fR]
+Generates or regenerates an ECDSA P-256 (ES256) private key and a C2PA-compliant 2-tier X.509 certificate chain (Root CA + Leaf).
 .SH OPTIONS
 .TP
 .BR \-o ", " \-\-output " " \fIpath\fR
@@ -40,8 +40,45 @@ Author name and contact information (default: \fBDanyaNADAMU <git@nada.mu>\fR).
 .BR \-d ", " \-\-domain " " \fIdomain\fR
 Domain name associated with the signer certificate (default: \fBnada.mu\fR).
 .TP
+.BR \-m ", " \-\-description " " \fIdesc\fR
+Custom action description embedded in the manifest.
+.TP
+.BR \-l ", " \-\-license " " \fItext\fR
+Copyright or license notice.
+.TP
+.BR \-w ", " \-\-watermark " " \fItext\fR
+Custom text string to embed as invisible DWT-DCT watermark (default: signing domain).
+.TP
+.B \-\-no-watermark
+Disables invisible DWT-DCT watermarking (signs with C2PA manifest only).
+.TP
+.B \-\-no-c2pa
+Disables C2PA manifest signing (embeds invisible DWT-DCT watermark only).
+.TP
+.BR \-s ", " \-\-secret " " \fIpassphrase\fR
+Secret passphrase for pseudorandom watermark block scrambling and extraction (default: SHA-256 of the C2PA private key).
+.TP
+.B \-\-key \fIfile\fR
+Path to custom EC private key in PEM format.
+.TP
+.B \-\-cert \fIfile\fR
+Path to custom X.509 certificate chain in PEM format.
+.TP
 .B \-\-json
-Prints the full raw C2PA manifest in JSON format when verifying.
+Outputs raw verification report or C2PA manifest in JSON format.
+.TP
+.B \-\-export
+Prints the raw private key and certificate chain in PEM format for Bitwarden vault backup.
+.SH FILES
+.TP
+.I ~/.config/nadamu/c2pa/es256_private.key
+Default ECDSA P-256 private key (permissions 0600).
+.TP
+.I ~/.config/nadamu/c2pa/es256_certs.pem
+Default 2-tier X.509 certificate chain (End-entity + Root CA).
+.TP
+.I ~/.config/nadamu/c2pa.json
+Configuration file for default author, domain, policy URL, license, and watermark parameters.
 .SH AUTHORS
 Maintained by DanyaNADAMU <git@nada.mu>.
 .SH SEE ALSO

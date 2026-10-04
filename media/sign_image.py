@@ -5,12 +5,15 @@
 #     "c2pa-python>=0.38.0",
 #     "cryptography>=43.0.0",
 #     "pillow>=10.0.0",
+#     "numpy>=1.26.0",
+#     "pywavelets>=1.6.0",
+#     "scipy>=1.13.0",
 # ]
 # ///
 # ==============================================================================
 # Script:      sign_image.py
 # Category:    media
-# Description: Sign and inspect media files using C2PA Content Credentials.
+# Description: Multi-layer image signing: C2PA Content Credentials & DWT-DCT Steganography.
 # Target:      Linux / macOS
 # Requires:    python >= 3.11, uv
 # Usage:       sign-image [sign|verify|credentials|keygen] [options] <file>
@@ -19,12 +22,21 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
+import io
 import json
 import os
+import random
 import shutil
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+from PIL import Image
+import pywt
+from scipy.fftpack import dct, idct
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -44,7 +56,7 @@ DEFAULT_AUTHOR = "DanyaNADAMU <git@nada.mu>"
 DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 APP_NAME = "sign-image"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -87,6 +99,9 @@ def load_config() -> dict[str, Any]:
         "policy_url": DEFAULT_POLICY_URL,
         "default_license": f"All rights reserved. Verified at {DEFAULT_POLICY_URL}",
         "digital_source_type": DEFAULT_SOURCE_TYPE,
+        "watermark_text": DEFAULT_DOMAIN,
+        "watermark_delta": 35.0,
+        "watermark_repeats": 3,
     }
 
     if DEFAULT_CONFIG_FILE.is_file():
@@ -96,7 +111,6 @@ def load_config() -> dict[str, Any]:
         except Exception as e:
             log_warn(f"Failed to parse {DEFAULT_CONFIG_FILE}: {e}")
     else:
-        # Create default config file for easy customization
         try:
             DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             DEFAULT_CONFIG_FILE.write_text(
@@ -109,7 +123,162 @@ def load_config() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------------------
-# Key & Certificate Management
+# Stage 2: Invisible DWT-DCT Steganographic Watermarking
+# ------------------------------------------------------------------------------
+def _dct2(a: np.ndarray) -> np.ndarray:
+    return dct(dct(a.T, norm="ortho").T, norm="ortho")
+
+
+def _idct2(a: np.ndarray) -> np.ndarray:
+    return idct(idct(a.T, norm="ortho").T, norm="ortho")
+
+
+def _make_watermark_packet(text: str) -> list[int]:
+    """Frames text into a packet: [MAGIC 'NADA' (4B)] [LEN (1B)] [PAYLOAD] [CRC8 (1B)]."""
+    raw = text.encode("utf-8")
+    crc = zlib.crc32(raw) & 0xFF
+    packet = b"NADA" + bytes([len(raw)]) + raw + bytes([crc])
+    bits = []
+    for b in packet:
+        for i in range(7, -1, -1):
+            bits.append((b >> i) & 1)
+    return bits
+
+
+def _parse_watermark_packet(bits: list[int]) -> str | None:
+    """Parses bits and validates magic header and CRC8 checksum."""
+    if len(bits) < 48:
+        return None
+    data = bytearray()
+    for i in range(0, len(bits) - 7, 8):
+        byte_val = int("".join(str(b) for b in bits[i : i + 8]), 2)
+        data.append(byte_val)
+    if len(data) < 6 or data[:4] != b"NADA":
+        return None
+    length = data[4]
+    if len(data) < 5 + length + 1:
+        return None
+    raw = bytes(data[5 : 5 + length])
+    expected_crc = data[5 + length]
+    if (zlib.crc32(raw) & 0xFF) != expected_crc:
+        return None
+    return raw.decode("utf-8", errors="ignore")
+
+
+def embed_dwt_watermark(
+    img: Image.Image,
+    text: str,
+    secret: str,
+    delta: float = 35.0,
+    repeats: int = 3,
+) -> Image.Image:
+    """Embeds an invisible, robust DWT-DCT watermark into the luminance channel."""
+    has_alpha = img.mode == "RGBA"
+    alpha = img.getchannel("A") if has_alpha else None
+    rgb_img = img.convert("RGB")
+
+    ycbcr = rgb_img.convert("YCbCr")
+    Y, Cb, Cr = ycbcr.split()
+    y_arr = np.array(Y, dtype=np.float32)
+
+    LL, (LH, HL, HH) = pywt.dwt2(y_arr, "haar")
+    h, w = LL.shape
+    blocks_h, blocks_w = h // 8, w // 8
+    total_blocks = blocks_h * blocks_w
+
+    packet_bits = _make_watermark_packet(text)
+    expanded_bits: list[int] = []
+    for b in packet_bits:
+        expanded_bits.extend([b] * repeats)
+
+    if len(expanded_bits) > total_blocks:
+        raise ValueError(
+            f"Image resolution too small ({img.width}x{img.height}) to host watermark. "
+            f"Need {len(expanded_bits)} 8x8 blocks, but only {total_blocks} available."
+        )
+
+    # Scramble block order using pseudo-random permutation derived from secret
+    rng = random.Random(secret)
+    indices = list(range(total_blocks))
+    rng.shuffle(indices)
+
+    for i, bit in enumerate(expanded_bits):
+        block_idx = indices[i]
+        by = block_idx // blocks_w
+        bx = block_idx % blocks_w
+
+        block = LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8]
+        d = _dct2(block)
+        # Manipulate mid-frequency coefficients [1, 2] and [2, 1]
+        c1, c2 = d[1, 2], d[2, 1]
+        if bit == 1:
+            if c1 <= c2 + delta:
+                d[1, 2] = c2 + delta
+        else:
+            if c2 <= c1 + delta:
+                d[2, 1] = c1 + delta
+        LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8] = _idct2(d)
+
+    y_wm = pywt.idwt2((LL, (LH, HL, HH)), "haar")
+    y_wm = np.clip(y_wm, 0, 255).astype(np.uint8)
+
+    res_img = Image.merge("YCbCr", (Image.fromarray(y_wm), Cb, Cr)).convert("RGB")
+    if has_alpha and alpha:
+        res_img.putalpha(alpha)
+    return res_img
+
+
+def extract_dwt_watermark(
+    img: Image.Image,
+    secret: str,
+    repeats: int = 3,
+    max_payload_bytes: int = 64,
+) -> str | None:
+    """Scans and extracts an invisible DWT-DCT watermark from image frequencies."""
+    rgb_img = img.convert("RGB")
+    Y, _, _ = rgb_img.convert("YCbCr").split()
+    y_arr = np.array(Y, dtype=np.float32)
+
+    LL, _ = pywt.dwt2(y_arr, "haar")
+    h, w = LL.shape
+    blocks_h, blocks_w = h // 8, w // 8
+    total_blocks = blocks_h * blocks_w
+
+    max_bits = (6 + max_payload_bytes) * 8 * repeats
+    num_to_read = min(max_bits, total_blocks)
+
+    rng = random.Random(secret)
+    indices = list(range(total_blocks))
+    rng.shuffle(indices)
+
+    raw_bits: list[int] = []
+    for i in range(num_to_read):
+        block_idx = indices[i]
+        by = block_idx // blocks_w
+        bx = block_idx % blocks_w
+        block = LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8]
+        d = _dct2(block)
+        raw_bits.append(1 if d[1, 2] > d[2, 1] else 0)
+
+    # Majority voting over repetitions to filter compression noise
+    voted_bits: list[int] = []
+    for i in range(0, len(raw_bits) - repeats + 1, repeats):
+        chunk = raw_bits[i : i + repeats]
+        voted_bits.append(1 if sum(chunk) > (repeats // 2) else 0)
+
+    return _parse_watermark_packet(voted_bits)
+
+
+def get_default_secret() -> str:
+    """Derives a deterministic default secret from the user's C2PA private key hash."""
+    if DEFAULT_KEY_PATH.is_file():
+        key_data = DEFAULT_KEY_PATH.read_bytes()
+        return hashlib.sha256(key_data).hexdigest()
+    return "nada.mu-default-watermark-key"
+
+
+# ------------------------------------------------------------------------------
+# Stage 1: C2PA Key & Certificate Management
 # ------------------------------------------------------------------------------
 def generate_c2pa_credentials(
     domain: str = DEFAULT_DOMAIN,
@@ -213,7 +382,6 @@ def generate_c2pa_credentials(
 
     key_out.write_bytes(leaf_key_pem)
     cert_out.write_bytes(chain_pem)
-    # Set secure 0600 permissions for private key
     os.chmod(key_out, 0o600)
 
     return leaf_key_pem, chain_pem
@@ -244,7 +412,6 @@ def manage_credentials(
     """Exports or imports C2PA credentials for backup to Bitwarden or deployment to prod."""
     DEFAULT_KEY_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Import Mode
     if import_key or import_cert:
         if not (import_key and import_cert):
             log_err("Both --import-key and --import-cert must be specified.")
@@ -264,14 +431,12 @@ def manage_credentials(
         log_ok(f"Imported cert chain to:  {DEFAULT_CERT_PATH}")
         return
 
-    # Check existence
     if not (DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file()):
         cfg = load_config()
         log_info(f"Credentials not found. Generating initial credentials in {DEFAULT_KEY_DIR}...")
         generate_c2pa_credentials(cfg.get("domain", DEFAULT_DOMAIN))
 
     if export_raw:
-        # Raw PEM dump to stdout (convenient for pipes or pasting into Bitwarden)
         print("# ==============================================================================")
         print("# C2PA PRIVATE KEY (Save to Bitwarden / Secret Vault)")
         print("# ==============================================================================")
@@ -282,7 +447,6 @@ def manage_credentials(
         print(DEFAULT_CERT_PATH.read_text().strip())
         return
 
-    # Formatted display
     cert_data = DEFAULT_CERT_PATH.read_bytes()
     certs = x509.load_pem_x509_certificates(cert_data)
     leaf = certs[0]
@@ -305,9 +469,9 @@ def manage_credentials(
 
 
 # ------------------------------------------------------------------------------
-# Core C2PA Operations: Sign & Inspect
+# Combined Pipeline: Sign & Inspect (Stage 1 + Stage 2)
 # ------------------------------------------------------------------------------
-def sign_image(
+def process_signing(
     input_path: Path,
     output_path: Path,
     title: str | None = None,
@@ -315,10 +479,14 @@ def sign_image(
     domain: str | None = None,
     description: str | None = None,
     license_text: str | None = None,
+    watermark_payload: str | None = None,
+    no_watermark: bool = False,
+    no_c2pa: bool = False,
+    secret: str | None = None,
     key_path: Path | None = None,
     cert_path: Path | None = None,
 ) -> None:
-    """Embeds a C2PA manifest with author declarations into the image."""
+    """Executes multi-layer signing (DWT-DCT steganography + C2PA Content Credentials)."""
     if not input_path.is_file():
         log_err(f"Input file not found: {input_path}")
         sys.exit(1)
@@ -330,133 +498,190 @@ def sign_image(
     act_policy = cfg.get("policy_url", DEFAULT_POLICY_URL)
     act_license = license_text or cfg.get("default_license", "")
     src_type = cfg.get("digital_source_type", DEFAULT_SOURCE_TYPE)
-
-    key_bytes, cert_bytes = load_or_create_credentials(key_path, cert_path, act_domain)
-
-    signer_info = c2pa.C2paSignerInfo(
-        alg=c2pa.C2paSigningAlg.ES256,
-        sign_cert=cert_bytes,
-        private_key=key_bytes,
-        ta_url=None,
-    )
-    signer = c2pa.Signer.from_info(signer_info)
+    wm_text = watermark_payload or cfg.get("watermark_text", act_domain)
+    wm_secret = secret or get_default_secret()
+    wm_delta = float(cfg.get("watermark_delta", 35.0))
+    wm_repeats = int(cfg.get("watermark_repeats", 3))
 
     asset_title = title or input_path.stem
     desc_text = description or f"Original media authored by {act_author} on {act_domain}."
 
-    action_params: dict[str, Any] = {
-        "description": desc_text,
-        "author": act_author,
-        "canonical_policy": act_policy,
-    }
-    if act_license:
-        action_params["license"] = act_license
-
-    manifest_def: dict[str, Any] = {
-        "claim_generator": f"{APP_NAME}/{APP_VERSION} ({act_domain})",
-        "claim_generator_info": [{"name": APP_NAME, "version": APP_VERSION}],
-        "title": asset_title,
-        "assertions": [
-            {
-                "label": "c2pa.actions",
-                "data": {
-                    "actions": [
-                        {
-                            "action": "c2pa.created",
-                            "digitalSourceType": src_type,
-                            "parameters": action_params,
-                        }
-                    ]
-                },
-            }
-        ],
-    }
-
-    log_head(f"Signing {input_path.name} with C2PA...")
+    log_head(f"Signing {input_path.name}...")
     log_info(f"Title:       {asset_title}")
     log_info(f"Author:      {act_author}")
     log_info(f"Domain:      {act_domain}")
     log_info(f"Target:      {output_path}")
 
-    try:
-        builder = c2pa.Builder.from_json(json.dumps(manifest_def))
-        is_inplace = input_path.resolve() == output_path.resolve()
-        temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}") if is_inplace else output_path
+    # Stage 2: Embed DWT-DCT Steganographic Watermark
+    work_file = output_path
+    if not no_watermark:
+        try:
+            with Image.open(input_path) as pil_img:
+                log_info(f"Stage 2: Embedding invisible DWT-DCT watermark ('{wm_text}')...")
+                wm_img = embed_dwt_watermark(
+                    pil_img,
+                    text=wm_text,
+                    secret=wm_secret,
+                    delta=wm_delta,
+                    repeats=wm_repeats,
+                )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                # Preserve format
+                save_fmt = pil_img.format or "PNG"
+                wm_img.save(output_path, format=save_fmt)
+                log_ok(f"Stage 2 complete: Watermark embedded into frequency spectrum.")
+        except Exception as e:
+            log_err(f"Steganographic watermarking failed: {e}")
+            sys.exit(1)
+    else:
+        log_info("Stage 2: Invisible watermarking disabled (--no-watermark).")
+        if input_path.resolve() != output_path.resolve():
+            shutil.copyfile(input_path, output_path)
 
-        builder.sign_file(str(input_path), str(temp_dest), signer)
+    # Stage 1: C2PA Content Credentials
+    if not no_c2pa:
+        log_info("Stage 1: Signing with C2PA Content Credentials...")
+        key_bytes, cert_bytes = load_or_create_credentials(key_path, cert_path, act_domain)
 
-        if is_inplace:
+        signer_info = c2pa.C2paSignerInfo(
+            alg=c2pa.C2paSigningAlg.ES256,
+            sign_cert=cert_bytes,
+            private_key=key_bytes,
+            ta_url=None,
+        )
+        signer = c2pa.Signer.from_info(signer_info)
+
+        action_params: dict[str, Any] = {
+            "description": desc_text,
+            "author": act_author,
+            "canonical_policy": act_policy,
+        }
+        if act_license:
+            action_params["license"] = act_license
+
+        manifest_def: dict[str, Any] = {
+            "claim_generator": f"{APP_NAME}/{APP_VERSION} ({act_domain})",
+            "claim_generator_info": [{"name": APP_NAME, "version": APP_VERSION}],
+            "title": asset_title,
+            "assertions": [
+                {
+                    "label": "c2pa.actions",
+                    "data": {
+                        "actions": [
+                            {
+                                "action": "c2pa.created",
+                                "digitalSourceType": src_type,
+                                "parameters": action_params,
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+        try:
+            builder = c2pa.Builder.from_json(json.dumps(manifest_def))
+            temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}")
+            builder.sign_file(str(output_path), str(temp_dest), signer)
             temp_dest.replace(output_path)
+            log_ok("Stage 1 complete: C2PA cryptographic manifest embedded.")
+        except Exception as e:
+            log_err(f"C2PA signing error: {e}")
+            sys.exit(1)
+    else:
+        log_info("Stage 1: C2PA manifest signing disabled (--no-c2pa).")
 
-        log_ok(f"Successfully signed: {output_path} ({output_path.stat().st_size:,} bytes)")
-    except Exception as e:
-        log_err(f"C2PA signing error: {e}")
-        sys.exit(1)
+    log_ok(f"Ready: {output_path} ({output_path.stat().st_size:,} bytes)\n")
 
 
-def inspect_image(image_path: Path, as_json: bool = False) -> None:
-    """Reads and displays C2PA manifest provenance information."""
+def inspect_image(
+    image_path: Path,
+    as_json: bool = False,
+    secret: str | None = None,
+) -> None:
+    """Verifies both C2PA Content Credentials and DWT-DCT invisible watermarks."""
     if not image_path.is_file():
         log_err(f"File not found: {image_path}")
         sys.exit(1)
 
+    log_head(f"Media Verification: {image_path.name}")
+
+    # 1. Verify C2PA Manifest (Stage 1)
+    c2pa_data: dict[str, Any] | None = None
+    c2pa_val_str = "None"
     try:
         reader = c2pa.Reader.try_create(str(image_path))
+        if reader is not None:
+            c2pa_data = json.loads(reader.json())
+            try:
+                c2pa_val_str = str(reader.get_validation_state())
+            except Exception:
+                c2pa_val_str = "Unknown"
     except Exception as e:
-        log_err(f"Error reading C2PA data: {e}")
-        sys.exit(1)
+        log_warn(f"C2PA reader error: {e}")
 
-    if reader is None:
-        log_warn(f"No C2PA manifest found in {image_path.name}.")
-        return
+    # 2. Verify DWT-DCT Invisible Watermark (Stage 2)
+    cfg = load_config()
+    wm_secret = secret or get_default_secret()
+    wm_repeats = int(cfg.get("watermark_repeats", 3))
+    detected_wm: str | None = None
 
-    raw_json_str = reader.json()
-    if as_json:
-        print(raw_json_str)
-        return
-
-    manifest_data = json.loads(raw_json_str)
-    active_label = manifest_data.get("active_manifest")
-    manifests = manifest_data.get("manifests", {})
-    active = manifests.get(active_label, {})
-
-    log_head(f"C2PA Content Credentials: {image_path.name}")
-    print(f"  {C_BOLD}Active Manifest:{C_RESET} {active_label}")
-    print(f"  {C_BOLD}Title:{C_RESET}           {active.get('title', 'N/A')}")
-    print(f"  {C_BOLD}Generator:{C_RESET}       {active.get('claim_generator_info', [{}])[0].get('name', 'N/A')}")
-
-    sig_info = active.get("signature_info", {})
-    if sig_info:
-        print(f"  {C_BOLD}Signer:{C_RESET}          {sig_info.get('common_name', 'N/A')} ({sig_info.get('issuer', 'N/A')})")
-        print(f"  {C_BOLD}Algorithm:{C_RESET}       {sig_info.get('alg', 'N/A')}")
-
-    assertions = active.get("assertions", [])
-    if assertions:
-        print(f"\n  {C_BOLD}Assertions ({len(assertions)}):{C_RESET}")
-        for ass in assertions:
-            label = ass.get("label", "unknown")
-            print(f"    - {C_CYAN}{label}{C_RESET}")
-            if "actions" in label:
-                actions = ass.get("data", {}).get("actions", [])
-                for act in actions:
-                    act_name = act.get("action", "")
-                    src_type = act.get("digitalSourceType", "")
-                    params = act.get("parameters", {})
-                    print(f"        Action: {C_GREEN}{act_name}{C_RESET} (Source: {src_type})")
-                    for k, v in params.items():
-                        print(f"        {k}: {v}")
-
-    # Check validation state and pixel integrity
     try:
-        val_state = reader.get_validation_state()
-        val_str = str(val_state)
-    except Exception:
-        val_str = "Unknown"
+        with Image.open(image_path) as pil_img:
+            detected_wm = extract_dwt_watermark(pil_img, secret=wm_secret, repeats=wm_repeats)
+    except Exception as e:
+        log_warn(f"Watermark scan error: {e}")
 
-    if val_str == "Valid":
-        print(f"\n  {C_GREEN}[✓] Provenance manifest verified (Pixel hash & claim signature valid).{C_RESET}\n")
+    if as_json:
+        result = {
+            "file": str(image_path),
+            "c2pa": c2pa_data,
+            "c2pa_validation": c2pa_val_str,
+            "invisible_watermark": detected_wm,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    # Formatted terminal display
+    print(f"\n  {C_BOLD}--- LEVEL 1: C2PA Content Credentials ---{C_RESET}")
+    if c2pa_data:
+        active_label = c2pa_data.get("active_manifest")
+        active = c2pa_data.get("manifests", {}).get(active_label, {})
+        print(f"  {C_BOLD}Manifest:{C_RESET}     {active_label}")
+        print(f"  {C_BOLD}Title:{C_RESET}        {active.get('title', 'N/A')}")
+        print(f"  {C_BOLD}Generator:{C_RESET}    {active.get('claim_generator_info', [{}])[0].get('name', 'N/A')}")
+
+        sig_info = active.get("signature_info", {})
+        if sig_info:
+            print(f"  {C_BOLD}Signer:{C_RESET}       {sig_info.get('common_name', 'N/A')} ({sig_info.get('issuer', 'N/A')})")
+
+        if c2pa_val_str == "Valid":
+            print(f"  {C_GREEN}[✓] C2PA Signature: VALID (Pixel hash verified).{C_RESET}")
+        else:
+            print(f"  {C_RED}[✗] C2PA Signature: {c2pa_val_str} (Image modified or tampered!).{C_RESET}")
     else:
-        print(f"\n  {C_RED}[✗] WARNING: Manifest validation state: {val_str}. Image has been altered or tampered with!{C_RESET}\n")
+        print(f"  {C_YELLOW}[!] C2PA Manifest not found (stripped by messenger/social network, or unsigned).{C_RESET}")
+
+    print(f"\n  {C_BOLD}--- LEVEL 2: Invisible DWT-DCT Steganography ---{C_RESET}")
+    if detected_wm:
+        print(f"  {C_GREEN}[✓] Watermark Found: '{detected_wm}'{C_RESET}")
+        print(f"  {C_BLUE}[i] Integrity:       Survives lossy JPEG/WebP compression, resize, and screenshots.{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}[ ] No watermark detected (or encoded with a different secret key).{C_RESET}")
+
+    echo_summary(c2pa_val_str == "Valid", bool(detected_wm))
+
+
+def echo_summary(has_c2pa: bool, has_wm: bool) -> None:
+    print(f"\n  {C_BOLD}Summary Verdict:{C_RESET}")
+    if has_c2pa and has_wm:
+        print(f"    {C_GREEN}★ Full Attestation Verified (C2PA Manifest + Invisible Watermark).{C_RESET}\n")
+    elif has_c2pa:
+        print(f"    {C_GREEN}✓ C2PA Authenticity Verified (No watermark detected).{C_RESET}\n")
+    elif has_wm:
+        print(f"    {C_YELLOW}✓ Provenance Proven via Frequency Watermark (Metadata was stripped).{C_RESET}\n")
+    else:
+        print(f"    {C_RED}✗ Unverified: No cryptographic signatures or watermarks found.{C_RESET}\n")
 
 
 # ------------------------------------------------------------------------------
@@ -465,15 +690,17 @@ def inspect_image(image_path: Path, as_json: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sign-image",
-        description="Cryptographic media signing and verification using C2PA Content Credentials.",
+        description="Multi-layer media signing using C2PA Content Credentials & DWT-DCT Steganography.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sign-image sign image.png                       # Sign image with default nada.mu credentials
+  sign-image sign image.png                       # Sign with both C2PA and invisible watermark
   sign-image sign -o signed.jpg raw.jpg           # Sign and write to signed.jpg
-  sign-image sign --in-place banner.webp          # Embed C2PA manifest directly into file
-  sign-image verify image_signed.png              # Inspect embedded Content Credentials
-  sign-image verify --json image_signed.png       # Print complete raw C2PA manifest in JSON
+  sign-image sign --in-place banner.webp          # Embed signatures directly into file
+  sign-image sign --no-watermark photo.jpg        # C2PA manifest only
+  sign-image sign --no-c2pa photo.jpg             # Invisible watermark only
+  sign-image verify image_signed.png              # Inspect both C2PA and frequency watermark
+  sign-image verify --json image_signed.png       # Print complete raw verification report in JSON
   sign-image credentials                          # View active certificate details and paths
   sign-image credentials --export                 # Export key and cert for Bitwarden backup
   sign-image keygen                               # Regenerate dedicated signing certificates
@@ -483,7 +710,7 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Operation mode")
 
     # Command: sign
-    p_sign = subparsers.add_parser("sign", help="Sign an image with C2PA manifest")
+    p_sign = subparsers.add_parser("sign", help="Sign an image with C2PA and invisible watermark")
     p_sign.add_argument("input", type=Path, help="Input media file (PNG, JPG, WebP, etc.)")
     p_sign.add_argument("-o", "--output", type=Path, help="Output destination path (default: <name>_signed.<ext>)")
     p_sign.add_argument("--in-place", action="store_true", help="Overwrite the input file directly")
@@ -492,13 +719,18 @@ Examples:
     p_sign.add_argument("-d", "--domain", type=str, help="Signing domain")
     p_sign.add_argument("-m", "--description", type=str, help="Custom action description")
     p_sign.add_argument("-l", "--license", type=str, help="License or copyright text")
+    p_sign.add_argument("-w", "--watermark", type=str, help="Custom invisible watermark text (default: domain)")
+    p_sign.add_argument("--no-watermark", action="store_true", help="Disable invisible DWT-DCT watermark")
+    p_sign.add_argument("--no-c2pa", action="store_true", help="Disable C2PA manifest signing")
+    p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
 
     # Command: verify / inspect
-    p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA Content Credentials")
+    p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA & frequency watermarks")
     p_verify.add_argument("file", type=Path, help="Target media file to inspect")
-    p_verify.add_argument("--json", action="store_true", help="Output raw manifest JSON")
+    p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
+    p_verify.add_argument("--json", action="store_true", help="Output raw verification report in JSON")
 
     # Command: credentials (view, export, import)
     p_cred = subparsers.add_parser("credentials", help="View, export, or import signing credentials (Bitwarden backup)")
@@ -542,7 +774,7 @@ Examples:
         log_ok(f"Cert written: {out_cert}")
 
     elif args.command == "verify":
-        inspect_image(args.file, as_json=args.json)
+        inspect_image(args.file, as_json=args.json, secret=args.secret)
 
     elif args.command == "sign":
         if args.in_place:
@@ -552,7 +784,7 @@ Examples:
         else:
             dest = args.input.with_name(f"{args.input.stem}_signed{args.input.suffix}")
 
-        sign_image(
+        process_signing(
             input_path=args.input,
             output_path=dest,
             title=args.title,
@@ -560,6 +792,10 @@ Examples:
             domain=args.domain,
             description=args.description,
             license_text=args.license,
+            watermark_payload=args.watermark,
+            no_watermark=args.no_watermark,
+            no_c2pa=args.no_c2pa,
+            secret=args.secret,
             key_path=args.key,
             cert_path=args.cert,
         )

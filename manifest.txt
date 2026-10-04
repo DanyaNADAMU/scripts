@@ -3,4 +3,4 @@
 # Format: <repo_source_path>:<command_name>:<category>:<description>
 # ==============================================================================
 server/setup_user.sh:setup-user:server:Provision Linux user with Zsh, SSH key, and rootless Podman
-media/sign_image.py:sign-image:media:Sign and verify images with C2PA Content Credentials
+media/sign_image.py:sign-image:media:Multi-layer media signing with C2PA and invisible frequency watermarks

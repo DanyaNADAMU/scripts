@@ -3,8 +3,9 @@
 _sign_image() {
     local -a commands
     commands=(
-        'sign:Sign an image with C2PA Content Credentials'
-        'verify:Inspect and verify C2PA Content Credentials'
+        'sign:Sign an image with C2PA and invisible watermark'
+        'verify:Inspect and verify C2PA & frequency watermarks'
+        'credentials:View, export, or import signing credentials'
         'keygen:Generate or regenerate C2PA signing credentials'
     )
 
@@ -26,16 +27,29 @@ _sign_image() {
                         '(-a --author)'{-a,--author}'[Author name and contact]:author:' \
                         '(-d --domain)'{-d,--domain}'[Signing domain]:domain:' \
                         '(-m --description)'{-m,--description}'[Custom action description]:desc:' \
+                        '(-l --license)'{-l,--license}'[License or copyright notice]:license:' \
+                        '(-w --watermark)'{-w,--watermark}'[Custom watermark text]:text:' \
+                        '--no-watermark[Disable invisible DWT-DCT watermark]' \
+                        '--no-c2pa[Disable C2PA manifest signing]' \
+                        '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark permutation]:passphrase:' \
                         '--key[Custom EC private key PEM]:key file:_files' \
                         '--cert[Custom X.509 certificate chain PEM]:cert file:_files' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
-                        '*:media file:_files -g "*.([pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[aA][vV][iI][fF]|[sS][vV][gG])"'
+                        '*:media file:_files -g "*.([pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[aA][vV][iI][fF]|[sS][vV][gG]|[tT][iI][fF][fF])"'
                     ;;
                 verify)
                     _arguments \
-                        '--json[Output raw manifest in JSON]' \
+                        '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark extraction]:passphrase:' \
+                        '--json[Output raw verification report in JSON]' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
                         '*:target media:_files'
+                    ;;
+                credentials)
+                    _arguments \
+                        '--export[Export raw private key and certificate chain for Bitwarden backup]' \
+                        '--import-key[Import private key PEM file]:key file:_files' \
+                        '--import-cert[Import certificate chain PEM file]:cert file:_files' \
+                        '(-h --help)'{-h,--help}'[Display help message]'
                     ;;
                 keygen)
                     _arguments \

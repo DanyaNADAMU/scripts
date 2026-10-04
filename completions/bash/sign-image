@@ -1,23 +1,51 @@
 # Bash completion for sign-image
 _sign_image_completions() {
-    local cur prev commands
+    local cur prev commands cmd
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="sign verify keygen -h --help"
+    commands="sign verify credentials keygen -h --help"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
         return 0
     fi
 
+    cmd="${COMP_WORDS[1]}"
+
     case "$prev" in
-        -o|--output|--key|--cert)
+        -o|--output|--key|--cert|--import-key|--import-cert)
             COMPREPLY=( $(compgen -f -- "$cur") )
             return 0
             ;;
-        *)
-            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description --key --cert --json -h --help"
+        --out-dir)
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    case "$cmd" in
+        sign)
+            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description -l --license -w --watermark --no-watermark --no-c2pa -s --secret --key --cert -h --help"
             COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff)" -- "$cur") )
+            return 0
+            ;;
+        verify)
+            local opts="-s --secret --json -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff)" -- "$cur") )
+            return 0
+            ;;
+        credentials)
+            local opts="--export --import-key --import-cert -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        keygen)
+            local opts="-d --domain --out-dir -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        *)
+            COMPREPLY=( $(compgen -f -- "$cur") )
             return 0
             ;;
     esac
