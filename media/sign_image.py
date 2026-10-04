@@ -13,7 +13,7 @@
 # Description: Sign and inspect media files using C2PA Content Credentials.
 # Target:      Linux / macOS
 # Requires:    python >= 3.11, uv
-# Usage:       sign_image.py [sign|verify|keygen] [options] <file>
+# Usage:       sign-image [sign|verify|credentials|keygen] [options] <file>
 # ==============================================================================
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,13 +33,16 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import c2pa
 
-DEFAULT_KEY_DIR = Path.home() / ".config" / "nada" / "c2pa"
+DEFAULT_CONFIG_DIR = Path.home() / ".config" / "nadamu"
+DEFAULT_KEY_DIR = DEFAULT_CONFIG_DIR / "c2pa"
 DEFAULT_KEY_PATH = DEFAULT_KEY_DIR / "es256_private.key"
 DEFAULT_CERT_PATH = DEFAULT_KEY_DIR / "es256_certs.pem"
+DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "c2pa.json"
 
 DEFAULT_DOMAIN = "nada.mu"
 DEFAULT_AUTHOR = "DanyaNADAMU <git@nada.mu>"
 DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
+DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 APP_NAME = "sign-image"
 APP_VERSION = "1.0.0"
 
@@ -70,6 +74,38 @@ def log_err(msg: str) -> None:
 
 def log_head(msg: str) -> None:
     print(f"\n{C_CYAN}==>{C_RESET} {C_BOLD}{msg}{C_RESET}")
+
+
+# ------------------------------------------------------------------------------
+# Configuration File Management
+# ------------------------------------------------------------------------------
+def load_config() -> dict[str, Any]:
+    """Loads configuration from ~/.config/nadamu/c2pa.json or creates default."""
+    default_cfg = {
+        "author": DEFAULT_AUTHOR,
+        "domain": DEFAULT_DOMAIN,
+        "policy_url": DEFAULT_POLICY_URL,
+        "default_license": f"All rights reserved. Verified at {DEFAULT_POLICY_URL}",
+        "digital_source_type": DEFAULT_SOURCE_TYPE,
+    }
+
+    if DEFAULT_CONFIG_FILE.is_file():
+        try:
+            user_cfg = json.loads(DEFAULT_CONFIG_FILE.read_text(encoding="utf-8"))
+            default_cfg.update(user_cfg)
+        except Exception as e:
+            log_warn(f"Failed to parse {DEFAULT_CONFIG_FILE}: {e}")
+    else:
+        # Create default config file for easy customization
+        try:
+            DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            DEFAULT_CONFIG_FILE.write_text(
+                json.dumps(default_cfg, indent=2) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    return default_cfg
 
 
 # ------------------------------------------------------------------------------
@@ -177,7 +213,7 @@ def generate_c2pa_credentials(
 
     key_out.write_bytes(leaf_key_pem)
     cert_out.write_bytes(chain_pem)
-    # Set secure permissions for private key
+    # Set secure 0600 permissions for private key
     os.chmod(key_out, 0o600)
 
     return leaf_key_pem, chain_pem
@@ -193,11 +229,79 @@ def load_or_create_credentials(
     if kp.is_file() and cp.is_file():
         return kp.read_bytes(), cp.read_bytes()
 
-    log_info(f"Generating new C2PA credentials for {domain} in {kp.parent}...")
+    log_info(f"Generating persistent C2PA credentials for {domain} in {kp.parent}...")
     key_bytes, cert_bytes = generate_c2pa_credentials(domain, kp, cp)
     log_ok(f"Generated signing key: {kp}")
     log_ok(f"Generated certificate chain: {cp}")
     return key_bytes, cert_bytes
+
+
+def manage_credentials(
+    export_raw: bool = False,
+    import_key: Path | None = None,
+    import_cert: Path | None = None,
+) -> None:
+    """Exports or imports C2PA credentials for backup to Bitwarden or deployment to prod."""
+    DEFAULT_KEY_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Import Mode
+    if import_key or import_cert:
+        if not (import_key and import_cert):
+            log_err("Both --import-key and --import-cert must be specified.")
+            sys.exit(1)
+        if not import_key.is_file():
+            log_err(f"Key file not found: {import_key}")
+            sys.exit(1)
+        if not import_cert.is_file():
+            log_err(f"Cert file not found: {import_cert}")
+            sys.exit(1)
+
+        shutil.copyfile(import_key, DEFAULT_KEY_PATH)
+        shutil.copyfile(import_cert, DEFAULT_CERT_PATH)
+        os.chmod(DEFAULT_KEY_PATH, 0o600)
+
+        log_ok(f"Imported private key to: {DEFAULT_KEY_PATH}")
+        log_ok(f"Imported cert chain to:  {DEFAULT_CERT_PATH}")
+        return
+
+    # Check existence
+    if not (DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file()):
+        cfg = load_config()
+        log_info(f"Credentials not found. Generating initial credentials in {DEFAULT_KEY_DIR}...")
+        generate_c2pa_credentials(cfg.get("domain", DEFAULT_DOMAIN))
+
+    if export_raw:
+        # Raw PEM dump to stdout (convenient for pipes or pasting into Bitwarden)
+        print("# ==============================================================================")
+        print("# C2PA PRIVATE KEY (Save to Bitwarden / Secret Vault)")
+        print("# ==============================================================================")
+        print(DEFAULT_KEY_PATH.read_text().strip())
+        print("\n# ==============================================================================")
+        print("# C2PA CERTIFICATE CHAIN")
+        print("# ==============================================================================")
+        print(DEFAULT_CERT_PATH.read_text().strip())
+        return
+
+    # Formatted display
+    cert_data = DEFAULT_CERT_PATH.read_bytes()
+    certs = x509.load_pem_x509_certificates(cert_data)
+    leaf = certs[0]
+
+    log_head("C2PA Signing Credentials (Active)")
+    print(f"  {C_BOLD}Key Path:{C_RESET}     {DEFAULT_KEY_PATH} (0600)")
+    print(f"  {C_BOLD}Cert Path:{C_RESET}    {DEFAULT_CERT_PATH}")
+    print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
+    print(f"  {C_BOLD}Subject:{C_RESET}      {leaf.subject.rfc4514_string()}")
+    print(f"  {C_BOLD}Issuer:{C_RESET}       {leaf.issuer.rfc4514_string()}")
+    print(f"  {C_BOLD}Fingerprint:{C_RESET}  SHA256:{leaf.fingerprint(hashes.SHA256()).hex()}")
+    print(f"  {C_BOLD}Valid Until:{C_RESET}  {leaf.not_valid_after_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  {C_BOLD}Chain Length:{C_RESET} {len(certs)} certificate(s)")
+
+    print(f"\n  {C_CYAN}[Tip for Bitwarden / Backup]:{C_RESET}")
+    print("    To copy private key & cert to clipboard for Bitwarden:")
+    print(f"      {C_BOLD}sign-image credentials --export{C_RESET}")
+    print("    To restore on another production machine:")
+    print(f"      {C_BOLD}sign-image credentials --import-key key.pem --import-cert cert.pem{C_RESET}\n")
 
 
 # ------------------------------------------------------------------------------
@@ -207,9 +311,10 @@ def sign_image(
     input_path: Path,
     output_path: Path,
     title: str | None = None,
-    author: str = DEFAULT_AUTHOR,
-    domain: str = DEFAULT_DOMAIN,
+    author: str | None = None,
+    domain: str | None = None,
     description: str | None = None,
+    license_text: str | None = None,
     key_path: Path | None = None,
     cert_path: Path | None = None,
 ) -> None:
@@ -218,7 +323,15 @@ def sign_image(
         log_err(f"Input file not found: {input_path}")
         sys.exit(1)
 
-    key_bytes, cert_bytes = load_or_create_credentials(key_path, cert_path, domain)
+    cfg = load_config()
+
+    act_author = author or cfg.get("author", DEFAULT_AUTHOR)
+    act_domain = domain or cfg.get("domain", DEFAULT_DOMAIN)
+    act_policy = cfg.get("policy_url", DEFAULT_POLICY_URL)
+    act_license = license_text or cfg.get("default_license", "")
+    src_type = cfg.get("digital_source_type", DEFAULT_SOURCE_TYPE)
+
+    key_bytes, cert_bytes = load_or_create_credentials(key_path, cert_path, act_domain)
 
     signer_info = c2pa.C2paSignerInfo(
         alg=c2pa.C2paSigningAlg.ES256,
@@ -229,10 +342,18 @@ def sign_image(
     signer = c2pa.Signer.from_info(signer_info)
 
     asset_title = title or input_path.stem
-    desc_text = description or f"Original media authored by {author} on {domain}."
+    desc_text = description or f"Original media authored by {act_author} on {act_domain}."
+
+    action_params: dict[str, Any] = {
+        "description": desc_text,
+        "author": act_author,
+        "canonical_policy": act_policy,
+    }
+    if act_license:
+        action_params["license"] = act_license
 
     manifest_def: dict[str, Any] = {
-        "claim_generator": f"{APP_NAME}/{APP_VERSION} ({domain})",
+        "claim_generator": f"{APP_NAME}/{APP_VERSION} ({act_domain})",
         "claim_generator_info": [{"name": APP_NAME, "version": APP_VERSION}],
         "title": asset_title,
         "assertions": [
@@ -242,12 +363,8 @@ def sign_image(
                     "actions": [
                         {
                             "action": "c2pa.created",
-                            "digitalSourceType": "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation",
-                            "parameters": {
-                                "description": desc_text,
-                                "author": author,
-                                "canonical_policy": DEFAULT_POLICY_URL,
-                            },
+                            "digitalSourceType": src_type,
+                            "parameters": action_params,
                         }
                     ]
                 },
@@ -257,13 +374,12 @@ def sign_image(
 
     log_head(f"Signing {input_path.name} with C2PA...")
     log_info(f"Title:       {asset_title}")
-    log_info(f"Author:      {author}")
-    log_info(f"Domain:      {domain}")
+    log_info(f"Author:      {act_author}")
+    log_info(f"Domain:      {act_domain}")
     log_info(f"Target:      {output_path}")
 
     try:
         builder = c2pa.Builder.from_json(json.dumps(manifest_def))
-        # Ensure temporary dest if input == output
         is_inplace = input_path.resolve() == output_path.resolve()
         temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}") if is_inplace else output_path
 
@@ -358,6 +474,8 @@ Examples:
   sign-image sign --in-place banner.webp          # Embed C2PA manifest directly into file
   sign-image verify image_signed.png              # Inspect embedded Content Credentials
   sign-image verify --json image_signed.png       # Print complete raw C2PA manifest in JSON
+  sign-image credentials                          # View active certificate details and paths
+  sign-image credentials --export                 # Export key and cert for Bitwarden backup
   sign-image keygen                               # Regenerate dedicated signing certificates
         """,
     )
@@ -370,9 +488,10 @@ Examples:
     p_sign.add_argument("-o", "--output", type=Path, help="Output destination path (default: <name>_signed.<ext>)")
     p_sign.add_argument("--in-place", action="store_true", help="Overwrite the input file directly")
     p_sign.add_argument("-t", "--title", type=str, help="Media title")
-    p_sign.add_argument("-a", "--author", type=str, default=DEFAULT_AUTHOR, help="Author name and contact")
-    p_sign.add_argument("-d", "--domain", type=str, default=DEFAULT_DOMAIN, help="Signing domain")
+    p_sign.add_argument("-a", "--author", type=str, help="Author name and contact")
+    p_sign.add_argument("-d", "--domain", type=str, help="Signing domain")
     p_sign.add_argument("-m", "--description", type=str, help="Custom action description")
+    p_sign.add_argument("-l", "--license", type=str, help="License or copyright text")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
 
@@ -381,6 +500,12 @@ Examples:
     p_verify.add_argument("file", type=Path, help="Target media file to inspect")
     p_verify.add_argument("--json", action="store_true", help="Output raw manifest JSON")
 
+    # Command: credentials (view, export, import)
+    p_cred = subparsers.add_parser("credentials", help="View, export, or import signing credentials (Bitwarden backup)")
+    p_cred.add_argument("--export", action="store_true", help="Print raw PEM key and cert to stdout for Bitwarden")
+    p_cred.add_argument("--import-key", type=Path, help="Import private key PEM file into ~/.config/nadamu/c2pa/")
+    p_cred.add_argument("--import-cert", type=Path, help="Import certificate chain PEM file into ~/.config/nadamu/c2pa/")
+
     # Command: keygen
     p_keygen = subparsers.add_parser("keygen", help="Generate or regenerate C2PA signing credentials")
     p_keygen.add_argument("-d", "--domain", type=str, default=DEFAULT_DOMAIN, help="Domain for certificates")
@@ -388,7 +513,7 @@ Examples:
 
     # Handle shortcut: if first arg is a file or flag, default to 'sign' or 'verify'
     args_list = sys.argv[1:]
-    if args_list and args_list[0] not in ("sign", "verify", "keygen", "-h", "--help"):
+    if args_list and args_list[0] not in ("sign", "verify", "credentials", "keygen", "-h", "--help"):
         if any(arg == "--verify" for arg in args_list):
             args_list.remove("--verify")
             args_list.insert(0, "verify")
@@ -401,7 +526,14 @@ Examples:
         parser.print_help()
         sys.exit(0)
 
-    if args.command == "keygen":
+    if args.command == "credentials":
+        manage_credentials(
+            export_raw=args.export,
+            import_key=args.import_key,
+            import_cert=args.import_cert,
+        )
+
+    elif args.command == "keygen":
         out_key = args.out_dir / "es256_private.key"
         out_cert = args.out_dir / "es256_certs.pem"
         log_head(f"Generating C2PA signing credentials for {args.domain}...")
@@ -427,6 +559,7 @@ Examples:
             author=args.author,
             domain=args.domain,
             description=args.description,
+            license_text=args.license,
             key_path=args.key,
             cert_path=args.cert,
         )

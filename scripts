@@ -58,6 +58,36 @@ get_sha256() {
 }
 
 # ------------------------------------------------------------------------------
+# Dependency Checking & Auto-Installation
+# ------------------------------------------------------------------------------
+check_dependencies() {
+    local cat="$1"
+    local auto_yes="$2"
+
+    if [ "$cat" = "all" ] || [ "$cat" = "media" ]; then
+        if ! command -v uv &>/dev/null; then
+            log_warn "Dependency 'uv' is missing (required for Python tools like sign-image)."
+            local install_uv="y"
+            if [ "$auto_yes" = false ]; then
+                read_input "Install 'uv' automatically via official installer (curl -LsSf https://astral.sh/uv/install.sh | sh)? (y/n)" "y" install_uv
+            fi
+            if [[ "$install_uv" =~ ^[Yy]$ ]]; then
+                log_info "Installing 'uv' via official installer..."
+                curl -LsSf https://astral.sh/uv/install.sh | sh || log_warn "uv auto-install failed. Please install manually."
+                export PATH="$HOME/.local/bin:$PATH"
+                if command -v uv &>/dev/null; then
+                    log_ok "'uv' installed successfully."
+                fi
+            else
+                log_info "Skipped 'uv' installation. (sign-image will require uv to run)."
+            fi
+        else
+            log_ok "Dependency check: 'uv' is available."
+        fi
+    fi
+}
+
+# ------------------------------------------------------------------------------
 # Scope & Path Configuration
 # ------------------------------------------------------------------------------
 set_scope_paths() {
@@ -227,6 +257,8 @@ cmd_install() {
             method="copy"
         fi
     fi
+
+    check_dependencies "$category" "$auto_yes"
 
     set_scope_paths "$scope"
 
