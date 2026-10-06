@@ -96,7 +96,7 @@ set_scope_paths() {
         BIN_DIR="/usr/local/bin"
         MAN_DIR="/usr/local/share/man/man1"
         BASH_COMP_DIR="/usr/share/bash-completion/completions"
-        ZSH_COMP_DIR="/usr/share/zsh/site-functions"
+        ZSH_COMP_DIR="/usr/local/share/zsh/site-functions"
         STATE_DIR="/var/lib/scripts"
         NEED_SUDO=true
     else
@@ -148,6 +148,48 @@ fetch_file() {
     else
         curl -fsSL "$GITHUB_RAW/$rel_path" -o "$dest_file"
     fi
+}
+
+install_asset() {
+    local rel_src="$1"
+    local target_file="$2"
+    local perm="${3:-644}"
+
+    local cmd_prefix=""
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        cmd_prefix="sudo"
+    fi
+
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        if [ -f "$REPO_DIR/$rel_src" ]; then
+            $cmd_prefix cp -f "$REPO_DIR/$rel_src" "$target_file"
+            $cmd_prefix chmod "$perm" "$target_file" 2>/dev/null || true
+        fi
+    else
+        local tmp_f
+        tmp_f="$(mktemp)"
+        if curl -fsSL "$GITHUB_RAW/$rel_src" -o "$tmp_f" 2>/dev/null && [ -s "$tmp_f" ]; then
+            $cmd_prefix cp -f "$tmp_f" "$target_file"
+            $cmd_prefix chmod "$perm" "$target_file" 2>/dev/null || true
+        fi
+        rm -f "$tmp_f"
+    fi
+}
+
+install_man_and_completions() {
+    local name="$1"
+    install_asset "docs/man/man1/${name}.1" "$MAN_DIR/${name}.1" "644"
+    install_asset "completions/bash/${name}" "$BASH_COMP_DIR/${name}" "644"
+    install_asset "completions/zsh/_${name}" "$ZSH_COMP_DIR/_${name}" "644"
+}
+
+uninstall_man_and_completions() {
+    local name="$1"
+    local cmd_prefix=""
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        cmd_prefix="sudo"
+    fi
+    $cmd_prefix rm -f "$MAN_DIR/${name}.1" "$BASH_COMP_DIR/${name}" "$ZSH_COMP_DIR/_${name}"
 }
 
 load_manifest() {
@@ -329,31 +371,8 @@ cmd_install() {
             count_unchanged=$((count_unchanged + 1))
         fi
 
-        # Install Man Page if present
-        local man_src="docs/man/man1/${cmd_name}.1"
-        local man_dst="$MAN_DIR/${cmd_name}.1"
-        if [ "$IS_LOCAL_REPO" = true ] && [ -f "$REPO_DIR/$man_src" ]; then
-            safe_copy_or_link "$REPO_DIR/$man_src" "$man_dst" "copy" "$NEED_SUDO"
-        elif [ "$IS_LOCAL_REPO" = false ]; then
-            local tmp_man
-            tmp_man="$(mktemp)"
-            if curl -fsSL "$GITHUB_RAW/$man_src" -o "$tmp_man" 2>/dev/null; then
-                if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-                    sudo cp -f "$tmp_man" "$man_dst"
-                else
-                    cp -f "$tmp_man" "$man_dst"
-                fi
-            fi
-            rm -f "$tmp_man"
-        fi
-
-        # Install Shell Completions if present
-        local bash_src="completions/bash/${cmd_name}"
-        local zsh_src="completions/zsh/_${cmd_name}"
-        if [ "$IS_LOCAL_REPO" = true ]; then
-            [ -f "$REPO_DIR/$bash_src" ] && safe_copy_or_link "$REPO_DIR/$bash_src" "$BASH_COMP_DIR/$cmd_name" "copy" "$NEED_SUDO"
-            [ -f "$REPO_DIR/$zsh_src" ] && safe_copy_or_link "$REPO_DIR/$zsh_src" "$ZSH_COMP_DIR/_$cmd_name" "copy" "$NEED_SUDO"
-        fi
+        # Install Man Page & Shell Completions
+        install_man_and_completions "$cmd_name"
     done < "$current_manifest"
 
     # Install the 'scripts' manager itself into the target bin directory
@@ -373,6 +392,7 @@ cmd_install() {
         fi
         rm -f "$tmp_self"
     fi
+    install_man_and_completions "scripts"
 
     # Check for Orphaned/Deprecated scripts
     if [ -f "$prev_manifest" ]; then
@@ -390,10 +410,11 @@ cmd_install() {
                     fi
                     if [[ "$del_reply" =~ ^[Yy]$ ]]; then
                         if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-                            sudo rm -f "$BIN_DIR/$p_cmd" "$MAN_DIR/${p_cmd}.1" "$BASH_COMP_DIR/$p_cmd" "$ZSH_COMP_DIR/_$p_cmd"
+                            sudo rm -f "$BIN_DIR/$p_cmd"
                         else
-                            rm -f "$BIN_DIR/$p_cmd" "$MAN_DIR/${p_cmd}.1" "$BASH_COMP_DIR/$p_cmd" "$ZSH_COMP_DIR/_$p_cmd"
+                            rm -f "$BIN_DIR/$p_cmd"
                         fi
+                        uninstall_man_and_completions "$p_cmd"
                         log_ok "Removed deprecated: $p_cmd"
                     fi
                 fi
@@ -419,6 +440,11 @@ cmd_install() {
         echo "    export PATH=\"$BIN_DIR:\$PATH\""
     else
         log_ok "PATH check passed ($BIN_DIR is active)."
+    fi
+
+    if [ "$scope" = "user" ]; then
+        echo "  [i] Note for Zsh completions in User scope: ensure $ZSH_COMP_DIR is in fpath in ~/.zshrc:"
+        echo "      fpath=($ZSH_COMP_DIR \$fpath)"
     fi
     echo ""
 }
@@ -462,10 +488,11 @@ cmd_uninstall() {
             [ -z "$src_path" ] && continue
 
             if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-                sudo rm -f "$BIN_DIR/$cmd_name" "$MAN_DIR/${cmd_name}.1" "$BASH_COMP_DIR/$cmd_name" "$ZSH_COMP_DIR/_$cmd_name"
+                sudo rm -f "$BIN_DIR/$cmd_name"
             else
-                rm -f "$BIN_DIR/$cmd_name" "$MAN_DIR/${cmd_name}.1" "$BASH_COMP_DIR/$cmd_name" "$ZSH_COMP_DIR/_$cmd_name"
+                rm -f "$BIN_DIR/$cmd_name"
             fi
+            uninstall_man_and_completions "$cmd_name"
             log_ok "Removed: $cmd_name"
         done < "$manifest_file"
 
@@ -474,9 +501,13 @@ cmd_uninstall() {
         else
             rm -rf "$STATE_DIR" "$BIN_DIR/scripts"
         fi
+        uninstall_man_and_completions "scripts"
     else
         log_warn "No state manifest found at $manifest_file. Cleaning known commands..."
-        rm -f "$BIN_DIR/setup-user" "$BIN_DIR/scripts"
+        rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/scripts"
+        uninstall_man_and_completions "setup-user"
+        uninstall_man_and_completions "sign-image"
+        uninstall_man_and_completions "scripts"
     fi
 
     log_ok "Uninstallation complete."
@@ -534,13 +565,9 @@ case "$ACTION" in
     uninstall)
         cmd_uninstall "$@"
         ;;
-    -h|--help|help)
+    ""|-h|--help|help)
         show_help
         exit 0
-        ;;
-    "")
-        # No args: launch interactive installer
-        cmd_install
         ;;
     *)
         log_err "Unknown command: '$ACTION'"

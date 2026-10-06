@@ -119,7 +119,7 @@ Tab completion for command names works out-of-the-box in all shells (`sh`, `bash
 
 Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are installed automatically for:
 * **Bash:** Installed to `~/.local/share/bash-completion/completions/` (or `/usr/share/bash-completion/completions/`)
-* **Zsh:** Installed to `~/.local/share/zsh/site-functions/` (or `/usr/share/zsh/site-functions/`)
+* **Zsh:** Installed to `~/.local/share/zsh/site-functions/` (or `/usr/local/share/zsh/site-functions/`)
 
 ---
 
