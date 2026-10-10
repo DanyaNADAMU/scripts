@@ -157,19 +157,19 @@ get_rclone_cmd() {
 }
 
 check_seafile() {
-    local rclone_bin
-    rclone_bin="$(command -v rclone 2>/dev/null || true)"
-    if [ -z "$rclone_bin" ]; then
-        return 1
-    fi
-
-    local extra_cfg=()
-    if [ -n "$RCLONE_CONFIG_PATH" ]; then
-        extra_cfg+=(--config "$RCLONE_CONFIG_PATH")
-    fi
-
     # Case 1: Remote endpoint (contains colon, e.g. seafile-dav: or seafile:)
     if [[ "$SEAFILE_SOURCE" == *:* ]]; then
+        local rclone_bin
+        rclone_bin="$(command -v rclone 2>/dev/null || true)"
+        if [ -z "$rclone_bin" ]; then
+            return 1
+        fi
+
+        local extra_cfg=()
+        if [ -n "$RCLONE_CONFIG_PATH" ]; then
+            extra_cfg+=(--config "$RCLONE_CONFIG_PATH")
+        fi
+
         # Check connection and verify libraries exist
         local list_output
         if list_output="$("$rclone_bin" lsd "$SEAFILE_SOURCE" --max-depth 1 "${extra_cfg[@]}" 2>/dev/null)"; then
@@ -193,6 +193,7 @@ check_seafile() {
 
     return 0
 }
+
 
 wait_for_prerequisites() {
     local timeout="$1"

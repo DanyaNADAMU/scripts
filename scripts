@@ -68,8 +68,22 @@ get_sha256() {
 check_dependencies() {
     local cat="$1"
     local auto_yes="$2"
+    local scope="${3:-user}"
 
     if [ "$cat" = "all" ] || [ "$cat" = "media" ]; then
+        # Check standard PATH first
+        if ! command -v uv &>/dev/null; then
+            # If uv exists in user's local bin, utilize it
+            if [ -x "$HOME/.local/bin/uv" ]; then
+                export PATH="$HOME/.local/bin:$PATH"
+                if [ "$scope" = "system" ] || [ "$EUID" -eq 0 ]; then
+                    mkdir -p /usr/local/bin
+                    ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || true
+                    ln -sf "$HOME/.local/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true
+                fi
+            fi
+        fi
+
         if ! command -v uv &>/dev/null; then
             log_warn "Dependency 'uv' is missing (required for Python tools like sign-image)."
             local install_uv="y"
@@ -78,10 +92,14 @@ check_dependencies() {
             fi
             if [[ "$install_uv" =~ ^[Yy]$ ]]; then
                 log_info "Installing 'uv' via official installer..."
-                curl -LsSf https://astral.sh/uv/install.sh | sh || log_warn "uv auto-install failed. Please install manually."
-                export PATH="$HOME/.local/bin:$PATH"
+                local target_dir="$HOME/.local/bin"
+                if [ "$scope" = "system" ] || [ "$EUID" -eq 0 ]; then
+                    target_dir="/usr/local/bin"
+                fi
+                curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$target_dir" sh || log_warn "uv auto-install failed. Please install manually."
+                export PATH="$target_dir:$PATH"
                 if command -v uv &>/dev/null; then
-                    log_ok "'uv' installed successfully."
+                    log_ok "'uv' installed successfully into $target_dir."
                 fi
             else
                 log_info "Skipped 'uv' installation. (sign-image will require uv to run)."
@@ -91,6 +109,7 @@ check_dependencies() {
         fi
     fi
 }
+
 
 # ------------------------------------------------------------------------------
 # Scope & Path Configuration
@@ -305,9 +324,10 @@ cmd_install() {
         fi
     fi
 
-    check_dependencies "$category" "$auto_yes"
+    check_dependencies "$category" "$auto_yes" "$scope"
 
     set_scope_paths "$scope"
+
 
     if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
         log_info "System scope requested. Sudo privileges will be used."
