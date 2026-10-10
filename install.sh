@@ -7,7 +7,12 @@
 set -euo pipefail
 
 GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
+COMMIT_SHA="$(curl -fsSL "https://api.github.com/repos/DanyaNADAMU/scripts/commits/main" 2>/dev/null | grep '"sha"' | head -n 1 | cut -d'"' -f4 || echo "")"
+if [ -n "$COMMIT_SHA" ]; then
+    GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/$COMMIT_SHA"
+fi
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")"
+
 
 ARGS=()
 if [ $# -eq 0 ]; then
