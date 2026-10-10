@@ -4,6 +4,7 @@
 # Category:    desktop
 # Description: Encrypted incremental backup from SeaDrive to Google Drive via Rclone.
 # Target:      Linux workstations with SeaDrive and Rclone
+# Requires:    bash, rclone, systemd
 # Usage:       backup-seadrive [--help] [--setup-timer] [--remove-timer] [--status] [--dry-run]
 # ==============================================================================
 

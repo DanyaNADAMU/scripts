@@ -31,7 +31,7 @@ scripts/
 │   └── setup_user.sh        # Linux user provisioning with rootless Podman
 │
 ├── desktop/                 # Workstation & desktop environment scripts
-│   └── (Wayland, Niri, audio, screenshot tools)
+│   └── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
 │
 └── media/                   # Cryptographic media & attestation tools
     └── sign_image.py        # C2PA manifest signing & invisible watermarking
@@ -129,4 +129,5 @@ Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are i
 | :--- | :--- | :--- | :--- | :--- |
 | `scripts` | `scripts` | **Manager** | CLI package manager for the scripts ecosystem. | Bash |
 | `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
+| `backup-seadrive` | `desktop/backup_seadrive.sh` | **Desktop** | Automated encrypted incremental backup from SeaDrive to Google Drive via Rclone. | Bash, `rclone`, `systemd` |
 | `sign-image` | `media/sign_image.py` | **Media** | Signs images with C2PA manifests, DWT steganographic marks, and OpenTimestamps. | Python $\ge$ 3.11, `uv` |
