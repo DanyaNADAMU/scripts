@@ -3,10 +3,12 @@
 _backup_seadrive() {
     _arguments \
         '(-h --help)'{-h,--help}'[Display help message]' \
-        '--setup-timer[Install and enable daily systemd user timer]' \
+        '--setup-timer[Install and enable resilient periodic systemd user timer]' \
         '--remove-timer[Disable and remove systemd user timer]' \
-        '--status[Display systemd timer status and recent logs]' \
-        '--dry-run[Perform a trial run with no data transferred]'
+        '--status[Display systemd timer status, prerequisites, and recent logs]' \
+        '--force[Force backup now, bypassing cooldown and lock]' \
+        '--dry-run[Perform a trial run with no data transferred]' \
+        '--auto[Automated run mode used by systemd timer]'
 }
 
 _backup_seadrive "$@"

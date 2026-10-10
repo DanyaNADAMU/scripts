@@ -1,13 +1,15 @@
 .TH BACKUP-SEADRIVE 1 "October 2026" "scripts" "User Commands"
 .SH NAME
-backup-seadrive \- encrypted incremental backup from SeaDrive to Google Drive via Rclone
+backup-seadrive \- resilient encrypted incremental backup from SeaDrive to Google Drive via Rclone
 .SH SYNOPSIS
 .B backup-seadrive
 [\fB\-h\fR|\fB\-\-help\fR]
 [\fB\-\-setup-timer\fR]
 [\fB\-\-remove-timer\fR]
 [\fB\-\-status\fR]
+[\fB\-\-force\fR]
 [\fB\-\-dry-run\fR]
+[\fB\-\-auto\fR]
 .SH DESCRIPTION
 \fBbackup-seadrive\fR synchronizes files from a local \fBSeaDrive\fR virtual mount
 (\fB~/SeaDrive/My Libraries\fR) directly to a Zero-Knowledge encrypted Google Drive
@@ -15,23 +17,32 @@ destination (\fBgdrive-crypt:SeafileBackup\fR) using \fBrclone\fR.
 .PP
 Files and filenames are encrypted on-the-fly in RAM before reaching Google Drive.
 Only new and modified files are transferred (delta sync).
+.PP
+The utility features built-in resilience against offline system boots and roaming network interruptions.
+When the system starts without an internet connection or before SeaDrive is mounted, the scheduled job safely defers execution and retries on subsequent timer checks once connectivity is restored.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
 Displays brief command-line help and exits.
 .TP
 .B \-\-setup-timer
-Installs and enables a daily systemd user timer (\fBseafile-backup.timer\fR) running at 15:00.
-Includes \fBPersistent=true\fR so missed backups run after system wake.
+Installs and enables a resilient periodic systemd user timer (\fBseafile-backup.timer\fR).
+The timer checks every 15 minutes and executes the backup once per day (~20 hour cooldown) as soon as network and SeaDrive are ready.
 .TP
 .B \-\-remove-timer
 Stops, disables, and deletes the systemd user service and timer.
 .TP
 .B \-\-status
-Displays the active systemd timer status and prints the most recent entries from the log file.
+Displays systemd timer status, cooldown state (last run and elapsed time), current prerequisite health (network, mount, rclone), and recent log entries.
+.TP
+.B \-\-force
+Forces an immediate backup run, bypassing cooldown interval and flock checks.
 .TP
 .B \-\-dry-run
 Performs a trial run without transferring or writing any data to the remote.
+.TP
+.B \-\-auto
+Automated execution flag used by the systemd service. Enforces cooldown restrictions and silent deferred exits when prerequisites are not met.
 .SH ENVIRONMENT
 .TP
 .B SEADRIVE_SOURCE
@@ -43,8 +54,14 @@ Target encrypted remote and path (default: \fBgdrive-crypt:SeafileBackup\fR).
 .B LOG_DIR
 Directory for execution logs (default: \fB$HOME/.cache/rclone\fR).
 .TP
-.B BACKUP_TIME
-Schedule time for the systemd timer (default: \fB15:00:00\fR).
+.B BACKUP_INTERVAL_HOURS
+Minimum cooldown interval in hours between automatic backups (default: \fB20\fR).
+.TP
+.B CHECK_INTERVAL
+Systemd user timer poll frequency (default: \fB15m\fR).
+.TP
+.B WAIT_ONLINE_TIMEOUT
+Seconds to wait for network connectivity and SeaDrive mount at boot before deferring (default: \fB25\fR).
 .SH REQUIREMENTS
 Requires \fBrclone\fR, a configured \fBgdrive-crypt\fR remote, and a mounted \fBSeaDrive\fR instance.
 .SH AUTHORS

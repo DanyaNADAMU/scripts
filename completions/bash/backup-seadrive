@@ -3,7 +3,7 @@ _backup_seadrive_completions() {
     local cur
     cur="${COMP_WORDS[COMP_CWORD]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "-h --help --setup-timer --remove-timer --status --dry-run" -- "$cur") )
+        COMPREPLY=( $(compgen -W "-h --help --setup-timer --remove-timer --status --force --dry-run --auto" -- "$cur") )
     fi
 }
 complete -F _backup_seadrive_completions backup-seadrive
