@@ -158,9 +158,10 @@ safe_copy_or_link() {
     if [ "$mode" = "link" ]; then
         $cmd_prefix ln -sf "$src" "$dst"
     else
-        $cmd_prefix cp -f "$src" "$dst"
+        $cmd_prefix cp --remove-destination -f "$src" "$dst" 2>/dev/null || $cmd_prefix cp -f "$src" "$dst"
     fi
     $cmd_prefix chmod 755 "$dst" 2>/dev/null || true
+
 }
 
 fetch_file() {
@@ -377,12 +378,13 @@ cmd_install() {
             tmp_dl="$(mktemp)"
             fetch_file "$src_path" "$tmp_dl"
             if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-                sudo cp -f "$tmp_dl" "$target_bin"
+                sudo cp --remove-destination -f "$tmp_dl" "$target_bin" 2>/dev/null || sudo cp -f "$tmp_dl" "$target_bin"
                 sudo chmod 755 "$target_bin"
             else
-                cp -f "$tmp_dl" "$target_bin"
+                cp --remove-destination -f "$tmp_dl" "$target_bin" 2>/dev/null || cp -f "$tmp_dl" "$target_bin"
                 chmod 755 "$target_bin"
             fi
+
             rm -f "$tmp_dl"
         fi
 
@@ -413,12 +415,13 @@ cmd_install() {
         tmp_self="$(mktemp)"
         fetch_file "scripts" "$tmp_self"
         if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-            sudo cp -f "$tmp_self" "$scripts_bin"
+            sudo cp --remove-destination -f "$tmp_self" "$scripts_bin" 2>/dev/null || sudo cp -f "$tmp_self" "$scripts_bin"
             sudo chmod 755 "$scripts_bin"
         else
-            cp -f "$tmp_self" "$scripts_bin"
+            cp --remove-destination -f "$tmp_self" "$scripts_bin" 2>/dev/null || cp -f "$tmp_self" "$scripts_bin"
             chmod 755 "$scripts_bin"
         fi
+
         rm -f "$tmp_self"
     fi
     install_man_and_completions "scripts"
