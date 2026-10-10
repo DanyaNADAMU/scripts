@@ -51,7 +51,7 @@ read_input() {
 get_sha256() {
     local file="$1"
     if [ -f "$file" ]; then
-        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+        sha256sum "$file" 2>/dev/null | awk '{print $1}' || echo ""
     else
         echo ""
     fi
@@ -136,7 +136,7 @@ safe_copy_or_link() {
     else
         $cmd_prefix cp -f "$src" "$dst"
     fi
-    $cmd_prefix chmod +x "$dst" 2>/dev/null || true
+    $cmd_prefix chmod 755 "$dst" 2>/dev/null || true
 }
 
 fetch_file() {
@@ -353,10 +353,10 @@ cmd_install() {
             fetch_file "$src_path" "$tmp_dl"
             if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
                 sudo cp -f "$tmp_dl" "$target_bin"
-                sudo chmod +x "$target_bin"
+                sudo chmod 755 "$target_bin"
             else
                 cp -f "$tmp_dl" "$target_bin"
-                chmod +x "$target_bin"
+                chmod 755 "$target_bin"
             fi
             rm -f "$tmp_dl"
         fi
@@ -389,10 +389,10 @@ cmd_install() {
         fetch_file "scripts" "$tmp_self"
         if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
             sudo cp -f "$tmp_self" "$scripts_bin"
-            sudo chmod +x "$scripts_bin"
+            sudo chmod 755 "$scripts_bin"
         else
             cp -f "$tmp_self" "$scripts_bin"
-            chmod +x "$scripts_bin"
+            chmod 755 "$scripts_bin"
         fi
         rm -f "$tmp_self"
     fi
