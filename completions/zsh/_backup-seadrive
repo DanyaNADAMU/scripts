@@ -1,0 +1,12 @@
+#compdef backup-seadrive
+
+_backup_seadrive() {
+    _arguments \
+        '(-h --help)'{-h,--help}'[Display help message]' \
+        '--setup-timer[Install and enable daily systemd user timer]' \
+        '--remove-timer[Disable and remove systemd user timer]' \
+        '--status[Display systemd timer status and recent logs]' \
+        '--dry-run[Perform a trial run with no data transferred]'
+}
+
+_backup_seadrive "$@"
