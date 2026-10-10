@@ -320,7 +320,11 @@ cmd_install() {
     load_manifest "$current_manifest"
 
     local prev_manifest="$STATE_DIR/manifest.txt"
-    touch "$prev_manifest"
+    if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+        sudo touch "$prev_manifest"
+    else
+        touch "$prev_manifest"
+    fi
 
     log_head "Installing/Updating utilities in $BIN_DIR (Category: $category)..."
 
@@ -503,8 +507,12 @@ cmd_uninstall() {
         fi
         uninstall_man_and_completions "scripts"
     else
-        log_warn "No state manifest found at $manifest_file. Cleaning known commands..."
-        rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/scripts"
+        if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
+            sudo rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
+        else
+            rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
+        fi
+        uninstall_man_and_completions "backup-seadrive"
         uninstall_man_and_completions "setup-user"
         uninstall_man_and_completions "sign-image"
         uninstall_man_and_completions "scripts"
