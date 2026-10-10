@@ -28,7 +28,9 @@ scripts/
 │   └── zsh/                 # Zsh completions
 │
 ├── server/                  # Server-side administration & provisioning
-│   └── setup_user.sh        # Linux user provisioning with rootless Podman
+│   ├── setup_user.sh        # Linux user provisioning with rootless Podman
+│   └── backup_seafile.sh    # Resilient encrypted Seafile to Google Drive backup
+
 │
 ├── desktop/                 # Workstation & desktop environment scripts
 │   └── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
@@ -129,5 +131,7 @@ Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are i
 | :--- | :--- | :--- | :--- | :--- |
 | `scripts` | `scripts` | **Manager** | CLI package manager for the scripts ecosystem. | Bash |
 | `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
+| `backup-seafile` | `server/backup_seafile.sh` | **Server** | Automated encrypted incremental backup from Seafile (WebDAV/FUSE) to Google Drive. | Bash, `rclone`, `systemd` |
 | `backup-seadrive` | `desktop/backup_seadrive.sh` | **Desktop** | Automated encrypted incremental backup from SeaDrive to Google Drive via Rclone. | Bash, `rclone`, `systemd` |
 | `sign-image` | `media/sign_image.py` | **Media** | Signs images with C2PA manifests, DWT steganographic marks, and OpenTimestamps. | Python $\ge$ 3.11, `uv` |
+

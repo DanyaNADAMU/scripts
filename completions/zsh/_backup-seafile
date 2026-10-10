@@ -1,0 +1,15 @@
+#compdef backup-seafile
+
+_backup_seafile() {
+    _arguments \
+        '(-h --help)'{-h,--help}'[Display help message]' \
+        '(-c --config)'{-c,--config}'[Specify path to configuration file]:config file:_files' \
+        '--setup-timer[Install and enable resilient periodic systemd timer]' \
+        '--remove-timer[Disable and remove systemd timer and service]' \
+        '--status[Display systemd timer status, prerequisite health, and recent logs]' \
+        '--force[Force backup now, bypassing cooldown and lock]' \
+        '--dry-run[Perform a trial run with no data transferred]' \
+        '--auto[Automated run mode used by systemd timer]'
+}
+
+_backup_seafile "$@"

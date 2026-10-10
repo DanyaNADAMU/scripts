@@ -1,0 +1,86 @@
+.TH BACKUP-SEAFILE 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+backup-seafile \- resilient encrypted incremental backup from Seafile to Google Drive via Rclone
+.SH SYNOPSIS
+.B backup-seafile
+[\fB\-h\fR|\fB\-\-help\fR]
+[\fB\-c\fR|\fB\-\-config\fR \fIFILE\fR]
+[\fB\-\-setup-timer\fR]
+[\fB\-\-remove-timer\fR]
+[\fB\-\-status\fR]
+[\fB\-\-force\fR]
+[\fB\-\-dry-run\fR]
+[\fB\-\-auto\fR]
+.SH DESCRIPTION
+\fBbackup-seafile\fR synchronizes files from a \fBSeafile\fR instance (either via WebDAV \fBseafile-dav:\fR or a local FUSE mount like \fB/mnt/seafile-fuse\fR) directly to a Zero-Knowledge encrypted Google Drive destination (\fBgdrive-crypt:SeafileBackup\fR) using \fBrclone\fR.
+.PP
+Files and filenames are encrypted on-the-fly in RAM before reaching Google Drive. Only new and modified files are transferred (delta sync).
+.PP
+The utility is specifically architected for Linux server environments:
+.IP \(bu 2
+Can run completely headless without local FUSE mounts by streaming directly over Seafile WebDAV (\fBseafdav\fR).
+.IP \(bu 2
+Centralizes Google Drive authentication on a single backup server (supporting Google Service Account JSON keys).
+.IP \(bu 2
+Extracts "normal" filesystem hierarchies instead of proprietary Seafile/MinIO raw blocks and MySQL database dumps, ensuring fast zero-dependency disaster recovery.
+.IP \(bu 2
+Features systemd timer integration (both root system-wide and unprivileged user mode), flock concurrency guards, safe non-empty source verification, and optional syslog/webhook alerting.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Displays brief command-line help and exits.
+.TP
+.BR \-c ", " \-\-config " \fIFILE\fR"
+Loads settings from a specified configuration file (overriding defaults in \fB/etc/seafile-backup.conf\fR or \fB~/.config/seafile-backup.conf\fR).
+.TP
+.B \-\-setup-timer
+Installs and enables a resilient periodic systemd timer (\fBseafile-backup.timer\fR). If executed as root, installs system-wide to \fB/etc/systemd/system\fR; otherwise installs as a user service.
+.TP
+.B \-\-remove-timer
+Stops, disables, and deletes the systemd service and timer.
+.TP
+.B \-\-status
+Displays configuration, systemd timer status, cooldown state (last run and elapsed time), prerequisite health (network, Seafile endpoint, rclone), and recent log entries.
+.TP
+.B \-\-force
+Forces an immediate backup run, bypassing cooldown interval and flock checks.
+.TP
+.B \-\-dry-run
+Performs a trial run without transferring or writing any data to the remote.
+.TP
+.B \-\-auto
+Automated execution flag used by the systemd service. Enforces cooldown restrictions and silent deferred exits when prerequisites are not met.
+.SH ENVIRONMENT & CONFIGURATION
+.TP
+.B SEAFILE_SOURCE
+Rclone WebDAV remote or local path (default: \fBseafile-dav:\fR).
+.TP
+.B RCLONE_DEST
+Target encrypted remote and path (default: \fBgdrive-crypt:SeafileBackup\fR).
+.TP
+.B RCLONE_CONFIG_PATH
+Optional path to an explicit \fBrclone.conf\fR file.
+.TP
+.B LOG_DIR
+Directory for execution logs (default: \fB/var/log/seafile-backup\fR for root, \fB$HOME/.cache/rclone\fR for user).
+.TP
+.B BACKUP_INTERVAL_HOURS
+Minimum cooldown interval in hours between automatic backups (default: \fB20\fR).
+.TP
+.B CHECK_INTERVAL
+Systemd timer poll frequency (default: \fB15m\fR).
+.TP
+.B WAIT_ONLINE_TIMEOUT
+Seconds to wait for network connectivity and Seafile endpoint at boot before deferring (default: \fB25\fR).
+.TP
+.B ALERT_WEBHOOK_URL
+Optional HTTP webhook URL for JSON alert payloads upon backup completion or failure.
+.SH REQUIREMENTS
+Requires \fBrclone\fR, a configured \fBgdrive-crypt\fR remote, and access to Seafile via WebDAV or local mount.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR backup-seadrive (1),
+.BR scripts (1),
+.BR rclone (1),
+.BR systemctl (1)

@@ -3,5 +3,7 @@
 # Format: <repo_source_path>:<command_name>:<category>:<description>
 # ==============================================================================
 server/setup_user.sh:setup-user:server:Provision Linux user with Zsh, SSH key, and rootless Podman
+server/backup_seafile.sh:backup-seafile:server:Encrypted incremental backup from Seafile to Google Drive via Rclone
 media/sign_image.py:sign-image:media:Multi-layer media signing with C2PA, invisible watermarks & OpenTimestamps
 desktop/backup_seadrive.sh:backup-seadrive:desktop:Encrypted incremental backup from SeaDrive to Google Drive via Rclone
+

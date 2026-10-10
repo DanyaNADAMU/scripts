@@ -1,0 +1,16 @@
+# Bash completion for backup-seafile
+_backup_seafile_completions() {
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    if [[ "$prev" == "-c" || "$prev" == "--config" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
+        return 0
+    fi
+
+    if [ "$COMP_CWORD" -ge 1 ]; then
+        COMPREPLY=( $(compgen -W "-h --help -c --config --setup-timer --remove-timer --status --force --dry-run --auto" -- "$cur") )
+    fi
+}
+complete -F _backup_seafile_completions backup-seafile
