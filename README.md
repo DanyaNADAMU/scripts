@@ -92,6 +92,7 @@ Once installed, the `scripts` manager is available anywhere in your terminal:
 ```bash
 scripts update               # Pull upstream updates and sync all utilities (default: all)
 scripts list                 # View all declared utilities and installation status
+scripts autoupdate status    # Check status of automated update hooks (APT)
 scripts uninstall            # Cleanly remove all utilities, man pages, and completions
 scripts --help               # View command options and help
 ```
@@ -99,6 +100,7 @@ scripts --help               # View command options and help
 ### Transparent Updates & Scope Protection
 * **Automatic Synchronization:** `scripts update` verifies SHA-256 digests, pulls upstream changes (when inside a git clone), updates binaries, installs completions and man pages, and cleans up deprecated utilities. (Aliases `sync` and `install` are supported).
 * **Scope Protection:** If you run `scripts update` and an existing installation is detected with mismatched privileges, `scripts` safely prompts you to choose the desired action rather than creating accidental duplicates.
+* **Automated APT Hook:** In system scope (`/usr/local/bin`), `scripts` automatically configures an APT hook (`/etc/apt/apt.conf.d/99scripts`) so that utilities stay continuously up-to-date whenever `apt update` or `apt upgrade` runs. Manage with `sudo scripts autoupdate [status|enable|disable]`.
 
 ---
 

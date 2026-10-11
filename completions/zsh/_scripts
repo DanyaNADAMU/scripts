@@ -5,6 +5,7 @@ _scripts() {
     commands=(
         'update:Sync and update installed utilities from repository'
         'list:List all declared and installed scripts'
+        'autoupdate:Manage automated updates via package manager hooks'
         'uninstall:Remove installed scripts, man pages, and completions'
         'help:Show help information'
     )
@@ -26,6 +27,11 @@ _scripts() {
                         '--method[Installation method]:method:(link copy)' \
                         '(-y --yes)'{-y,--yes}'[Run non-interactively, accepting all defaults]' \
                         '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+                autoupdate)
+                    _arguments \
+                        '1:action:(status enable disable)' \
+                        '2:target:(apt)'
                     ;;
                 uninstall)
                     _arguments \

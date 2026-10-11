@@ -3,7 +3,7 @@ _scripts_completions() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="update list uninstall help"
+    commands="update list autoupdate uninstall help"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -11,6 +11,14 @@ _scripts_completions() {
     fi
 
     case "$prev" in
+        autoupdate)
+            COMPREPLY=( $(compgen -W "status enable disable" -- "$cur") )
+            return 0
+            ;;
+        enable|disable)
+            COMPREPLY=( $(compgen -W "apt" -- "$cur") )
+            return 0
+            ;;
         --scope)
             COMPREPLY=( $(compgen -W "user system" -- "$cur") )
             return 0
