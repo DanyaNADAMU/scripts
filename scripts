@@ -872,6 +872,21 @@ cmd_prune() {
         log_ok "Pruned: $item"
     done
 
+    # Clean up legacy user systemd timer if exists in user profile
+    local target_home="$HOME"
+    if [ -n "${SUDO_USER:-}" ] && [ "$EUID" -eq 0 ]; then
+        target_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || echo "$HOME")"
+    fi
+    local user_sysd="$target_home/.config/systemd/user"
+    if [ -f "$user_sysd/sign-image-ots.timer" ] || [ -f "$user_sysd/sign-image-ots.service" ]; then
+        if command -v systemctl &>/dev/null; then
+            systemctl --user disable --now sign-image-ots.timer 2>/dev/null || true
+            systemctl --user daemon-reload 2>/dev/null || true
+        fi
+        rm -f "$user_sysd/sign-image-ots.timer" "$user_sysd/sign-image-ots.service" 2>/dev/null || true
+        log_ok "Removed legacy user systemd unit: sign-image-ots.timer"
+    fi
+
     log_ok "Cleanup complete. All deprecated utilities and assets have been removed."
 }
 
