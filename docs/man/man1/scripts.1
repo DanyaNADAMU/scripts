@@ -9,8 +9,8 @@ scripts \- unified manager for the nada.mu personal utilities ecosystem
 It supports both local development workflows and standalone remote installations.
 .SH COMMANDS
 .TP
-.BR sync ", " update ", " install
-Synchronizes utilities with the upstream repository or local clone. Verifies SHA-256 digests, installs missing scripts, updates modified files, installs man pages and shell completions, and removes deprecated utilities. If executed within a git repository, automatically pulls the latest changes.
+.B update
+Synchronizes and updates all utilities with the repository. Verifies SHA-256 digests, installs missing scripts, updates modified files, installs man pages and shell completions, and removes deprecated utilities. If executed within a git repository, automatically pulls the latest changes. (Aliases: \fBsync\fR, \fBinstall\fR).
 .TP
 .B list
 Lists all utilities declared in the manifest, showing their installation status and paths.

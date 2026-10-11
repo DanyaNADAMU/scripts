@@ -75,7 +75,7 @@ git clone https://github.com/DanyaNADAMU/scripts.git ~/projects/scripts
 cd ~/projects/scripts
 
 # 2. Link utilities into ~/.local/bin (symlinks allow live edits)
-./scripts sync
+./scripts update
 ```
 
 Ensure `~/.local/bin` is in your `$PATH` (in `~/.zshrc` or `~/.bashrc`):
@@ -90,15 +90,15 @@ export PATH="$HOME/.local/bin:$PATH"
 Once installed, the `scripts` manager is available anywhere in your terminal:
 
 ```bash
-scripts sync                 # Synchronize & update all utilities (aliases: update, install)
+scripts update               # Pull upstream updates and sync all utilities (default: all)
 scripts list                 # View all declared utilities and installation status
 scripts uninstall            # Cleanly remove all utilities, man pages, and completions
 scripts --help               # View command options and help
 ```
 
-### Transparent Synchronization & Scope Protection
-* **Unified Operation:** `scripts sync`, `scripts update`, and `scripts install` are complete synonyms. They verify SHA-256 digests, pull upstream changes (when inside a git clone), update binaries, and clean up deprecated utilities.
-* **Scope Protection:** If you run `scripts sync` and an existing installation is detected with mismatched privileges, `scripts` safely prompts you to choose the desired action rather than creating accidental duplicates.
+### Transparent Updates & Scope Protection
+* **Automatic Synchronization:** `scripts update` verifies SHA-256 digests, pulls upstream changes (when inside a git clone), updates binaries, installs completions and man pages, and cleans up deprecated utilities. (Aliases `sync` and `install` are supported).
+* **Scope Protection:** If you run `scripts update` and an existing installation is detected with mismatched privileges, `scripts` safely prompts you to choose the desired action rather than creating accidental duplicates.
 
 ---
 

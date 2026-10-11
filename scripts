@@ -602,7 +602,7 @@ cmd_sync() {
         echo "  [i] Note for Zsh completions in User scope: ensure $ZSH_COMP_DIR is in fpath in ~/.zshrc:"
         echo "      fpath=($ZSH_COMP_DIR \$fpath)"
     fi
-    echo "  [i] All utilities synchronized. For category filtering, use: scripts sync --category <server|desktop|media>"
+    echo "  [i] All utilities synchronized. For category filtering, use: scripts update --category <server|desktop|media>"
     echo ""
 }
 
@@ -698,10 +698,10 @@ Usage: scripts [COMMAND] [OPTIONS]
 Unified manager for the nada.mu personal utilities ecosystem.
 
 Commands:
-  sync, update, install   Synchronize and update utilities with repository (default: all)
-  list                    List all declared utilities and their current status
-  uninstall               Remove installed utilities, man pages, and completions
-  help                    Display this help message
+  update       Sync and update utilities with repository (default: all)
+  list         List all declared utilities and their current status
+  uninstall    Remove installed utilities, man pages, and completions
+  help         Display this help message
 
 Options:
   --scope SCOPE        Target scope: 'user' (~/.local/bin) or 'system' (/usr/local/bin)
@@ -711,11 +711,9 @@ Options:
   -h, --help           Show this help message
 
 Examples:
-  scripts sync                            # Synchronize all utilities (auto-scope, zero-prompt)
-  scripts update                          # Alias for sync
-  scripts install                         # Alias for sync
-  scripts sync --category server          # Synchronize server utilities only
-  sudo scripts sync --scope system        # System-wide install/update in /usr/local/bin
+  scripts update                          # Update all utilities (auto-scope, zero-prompt)
+  scripts update --category server        # Update server utilities only
+  sudo scripts update --scope system      # System-wide update in /usr/local/bin
   scripts list                            # View available tools and statuses
 EOF
 }
