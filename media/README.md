@@ -1,42 +1,23 @@
 # media
 
-Cryptographic media processing, attestation, and verification utilities for the `nada.mu` ecosystem.
+Unified cryptographic media processing, C2PA attestation, invisible watermarking, Bitcoin blockchain anchoring, and versioned asset packaging for the `nada.mu` ecosystem.
 
-## Utilities
+## Overview
 
-### [`sign_image.py`](./sign_image.py) (`sign-image`)
-Signs digital images (PNG, JPEG, WebP, AVIF, SVG, TIFF) with **C2PA Content Credentials**, invisible **DWT-DCT steganographic watermarks**, and anchors them in the Bitcoin blockchain via **OpenTimestamps** (`.ots`).
+`media` replaces and unifies separate signing and asset building tools into a single, cohesive command-line utility.
 
-#### Key Features:
-* **Multi-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark + OpenTimestamps proof.
-* **Zero-Disk Bitwarden Integration:** Load signing keys directly from Bitwarden vault into RAM (`--bw`) with 0 secret bytes written to disk.
-* **Automated OTS Upgrades:** Built-in systemd user timer automation (`--setup-timer`) and recursive directory upgrading.
-* **Universal Runner:** Runs seamlessly via `uv run` with PEP 723 inline dependency isolation.
-
-#### Usage:
-```bash
-# Sign an image (C2PA + Watermark + OpenTimestamps)
-sign-image sign -a "Danya <git@nada.mu>" --stamp logo.png
-
-# Sign strictly in RAM using Bitwarden credentials
-sign-image sign --bw-item c2pa-signer --stamp logo.png
-
-# Verify provenance, watermark, and Bitcoin timestamp
-sign-image verify logo_signed.png
-
-# Recursively upgrade pending .ots files in a directory
-sign-image stamp --upgrade ~/SeaDrive/"My Libraries"/Icons
-
-# Install automated systemd timer for periodic .ots upgrades
-sign-image stamp --setup-timer ~/SeaDrive/"My Libraries"/Icons --timer-interval 2h
-```
+### Core Capabilities:
+* **Triple-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark (DWT-DCT) + OpenTimestamps proof.
+* **Asset Pipeline:** Multi-tier design asset compiler (`01_source` -> `02_signed` -> `03_dist`), multi-scale WebP/PNG rendering, and multi-layer `favicon.ico` (16..256 px).
+* **Zero-Disk Bitwarden Integration:** Load private keys and certificate chains directly from Bitwarden into RAM (`--bw`) with 0 secret bytes written to disk.
+* **Segregated Proofs Architecture:** Automatically isolates `.ots` files into a dedicated library (`Icons-Proofs` / `SEAFILE_PROOFS`), allowing remote servers to sync and upgrade proofs with 100% zero-media exposure.
+* **Non-Blocking Audit:** Diagnostic pass (`media audit`) reporting all SHA-256 mismatches, missing proofs, and orphaned files in a unified report.
+* **Automated Bitcoin Timers:** Built-in systemd user timer automation (`media timer setup`).
 
 ---
 
-### [`build_image.py`](./build_image.py) (`build-image`)
-Structured media asset pipeline for icons, logos, and UI graphics across versioned releases.
+## Directory Hierarchy
 
-#### Standard Directory Hierarchy:
 ```text
 <Icons-Library>/
 └── <asset_name>/
@@ -53,7 +34,7 @@ Structured media asset pipeline for icons, logos, and UI graphics across version
     │       └── ... (128, 64, 32)
     └── latest -> v1/
 
-# Optional Segregated Proofs Archive (<Icons-Proofs>/ or $SEADRIVE_PROOFS):
+# Segregated Proofs Archive (<Icons-Proofs>/ or $SEAFILE_PROOFS):
 <Icons-Proofs>/
 └── <asset_name>/
     ├── v1/
@@ -63,34 +44,58 @@ Structured media asset pipeline for icons, logos, and UI graphics across version
     └── latest -> v1/
 ```
 
-#### Key Features:
-* **Source Protection:** Immutable original canvas and master files locked with `chmod 0444` and anchored in Bitcoin.
-* **Segregated Proofs Archive:** Isolate `.ots` files into an independent repository (`--proofs-dir` / `$SEADRIVE_PROOFS`). This allows running `seaf-cli` and automated Bitcoin timers on remote servers with 100% zero-media exposure (only 1 MB of Merkle trees synced, zero images on server).
-* **Showcase Attestation:** 1024x1024 release signed cryptographically via C2PA, watermark, and OTS.
-* **Clean Distribution:** Multi-scale WebP/PNG downscales and multi-layer ICO without metadata bloating.
-* **Non-Blocking Audit:** Full diagnostic pass (`build-image audit`) reporting all hash mismatches, missing proofs, and orphaned files at once.
-* **Atomic Versioning:** Manages `latest` symlink and version upgrades without cross-version contamination.
+---
 
-#### Usage:
+## Command Reference
+
+### Asset Pipeline
+
 ```bash
-# Initialize standard folder scaffolding for a new asset version
-build-image init duck v1
+# Initialize folder scaffolding for a new asset version
+media init duck v1
 
-# Drop files into 01_source/ and build with auto-detection
-build-image build duck v1
+# Auto-detect source files from 01_source/ and compile release
+media build duck v1
 
-# Build with explicit source paths
-build-image build duck v1 --master duck_crop.png --raw duck.xcf
-
-# Build with Bitwarden in-memory signing
-build-image build duck v2 --master duck_crop.png --bw-item c2pa-signer
+# Compile with explicit source paths and Bitwarden signing
+media build duck v1 -m master.png -r canvas.xcf --bw
 
 # Run full non-blocking integrity audit across all assets
-build-image audit
+media audit duck v1
+media audit
 
-# Recursively upgrade OTS proofs for a specific asset version
-build-image upgrade duck v1
+# List managed assets and active versions
+media list
 
-# List managed assets and versions
-build-image list
+# Recursively upgrade pending OpenTimestamps proofs in Bitcoin
+media upgrade duck v1
+media upgrade
+```
+
+### File Attestation & Verification
+
+```bash
+# Sign an individual image (C2PA + Watermark + OpenTimestamps)
+media sign --bw --stamp hero.png
+
+# Verify provenance, watermark, and Bitcoin confirmation status
+media verify hero_signed.png
+
+# Anchor any arbitrary file in Bitcoin blockchain
+media stamp contract.pdf
+```
+
+### Automation & Key Management
+
+```bash
+# Set up background systemd user timer for periodic OTS upgrades
+media timer setup /home/apps/data/Icons-Proofs --interval 2h
+media timer status
+media timer remove
+
+# Inspect active C2PA certificates
+media keys show
+
+# Generate new C2PA credentials directly into Bitwarden vault
+media keys gen -d nada.mu --bw c2pa-signer
 ```

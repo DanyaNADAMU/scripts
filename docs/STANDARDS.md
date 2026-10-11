@@ -13,7 +13,7 @@ All scripts must reside in one of the approved category directories:
 * **`media/`** — Cryptographic attestation (C2PA), steganographic watermarking, media transformation, and timestamping.
 * **`common/`** — Shared helper libraries (sourced, not directly executed).
 
-Files must use single-word or snake_case naming for sources (`setup_user.sh`, `sign_image.py`), while installed command names must use kebab-case (`setup-user`, `sign-image`).
+Files must use single-word or snake_case naming for sources (`setup_user.sh`, `media.py`), while installed command names must use kebab-case or concise single-word names (`setup-user`, `media`).
 
 ---
 
@@ -42,14 +42,14 @@ Every script must begin with a standardized header block containing:
 
 ### Python Example:
 ```python
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 """
-Script:      sign_image.py
+Script:      media.py
 Category:    media
-Description: Embeds C2PA cryptographic manifests and invisible DWT watermarks.
+Description: Unified media lifecycle: C2PA attestation, steganography & Bitcoin timestamping.
 Target:      Cross-platform (Linux / macOS)
 Requires:    python >= 3.11, uv
-Usage:       uv run sign_image.py [options] <input> <output>
+Usage:       media [command] [options]
 """
 ```
 

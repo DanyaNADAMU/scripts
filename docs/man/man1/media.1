@@ -1,0 +1,215 @@
+.TH MEDIA 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+media \- unified media lifecycle: C2PA attestation, invisible watermarking, Bitcoin timestamping & asset generation
+.SH SYNOPSIS
+.B media
+.RI <command> " [" options "] [" arguments "]"
+.PP
+.B Asset Pipeline:
+.br
+.B media init
+.I name
+.I version
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.br
+.B media build
+.I name
+.I version
+.RB [ \-m " master" ]
+.RB [ \-r " raw" ]
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.RB [ \-\-sizes " sizes" ]
+.RB [ \-\-bw " [" \fIitem\fR ]]
+.RB [ \-\-no\-sign ]
+.RB [ \-\-no\-stamp ]
+.RB [ \-\-force ]
+.br
+.B media audit
+.RI [ name ]
+.RI [ version ]
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.br
+.B media list
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.br
+.B media upgrade
+.RI [ target ]
+.RI [ version ]
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.PP
+.B File Attestation:
+.br
+.B media sign
+.I input
+.RB [ \-o " output" ]
+.RB [ \-\-in\-place ]
+.RB [ \-\-stamp ]
+.RB [ \-\-bw " [" \fIitem\fR ]]
+.RB [ \-t " title" ]
+.RB [ \-a " author" ]
+.RB [ \-d " domain" ]
+.RB [ \-w " watermark" ]
+.RB [ \-\-no\-watermark ]
+.RB [ \-\-no\-c2pa ]
+.br
+.B media verify
+.I file
+.RB [ \-\-ots " proof" ]
+.RB [ \-\-bw " [" \fIitem\fR ]]
+.RB [ \-\-json ]
+.br
+.B media stamp
+.I file
+.RB [ \-f ]
+.RB [ \-\-wait ]
+.PP
+.B Automation & Keys:
+.br
+.B media timer
+.RB { setup " [" \fIdir\fR "] [" \-\-interval " \fIinterval\fR ]" | status | remove }
+.br
+.B media keys
+.RB { show | gen " [" \-d " \fIdomain\fR ] [" \-\-bw " \fIitem\fR ]" | export | push " [" \fIitem\fR ] }
+.SH DESCRIPTION
+\fBmedia\fR provides an end-to-end media attestation, provenance verification, asset packaging, and blockchain anchoring suite for the nada.mu ecosystem.
+It integrates three independent cryptographic layers into a unified workflow:
+.IP 1. 4
+\fBC2PA Content Credentials\fR (Level 1 provenance manifest and X.509 claim signing).
+.IP 2. 4
+\fBDWT-DCT Steganography\fR (frequency-domain invisible watermarks resilient to crop, compression, and scaling).
+.IP 3. 4
+\fBOpenTimestamps\fR (cryptographic proof of existence anchored in the Bitcoin blockchain).
+.SH COMMANDS
+.SS Asset Pipeline
+.TP
+.B init \fIname\fR \fIversion\fR
+Initializes the standardized directory hierarchy (\fB01_source/raw/\fR, \fB01_source/master/\fR, \fB02_signed/\fR, \fB03_dist/\fR, and the corresponding proofs directory) for a new asset version tag without building files.
+.TP
+.B build \fIname\fR \fIversion\fR
+Constructs a complete versioned release from source materials. Automatically discovers existing master and raw files if already placed in \fB01_source/\fR, or scaffolds the structure if empty. Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, and multi-layer \fBfavicon.ico\fR), and updates the atomic \fBlatest\fR symlink.
+.TP
+.B audit [\fIname\fR] [\fIversion\fR]
+Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
+Collects and displays all integrity violations in a single unified report. Detects hash mismatches (content altered after timestamping), missing proofs (source files lacking \fI.ots\fR), corrupted proofs, and orphaned proofs.
+.TP
+.B list
+Scans the managed icons library and lists all assets, available versions, active \fBlatest\fR pointers, and proofs archive locations.
+.TP
+.B upgrade [\fItarget\fR] [\fIversion\fR]
+Recursively queries OpenTimestamps calendar servers to upgrade pending proofs into finalized Bitcoin block header attestations.
+Can target an individual file, directory, specific asset version (\fBmedia upgrade duck v1\fR), or the entire proofs library.
+.SS File Attestation
+.TP
+.B sign \fIinput\fR
+Signs an arbitrary image (PNG, JPG, WebP, AVIF, SVG, TIFF) with C2PA Content Credentials and embeds an invisible frequency-domain watermark. With \fB\-\-stamp\fR, also anchors the file in the Bitcoin blockchain.
+.TP
+.B verify \fIfile\fR
+Inspects and verifies all three attestation layers of a media file: C2PA manifest validity, DWT-DCT invisible watermark extraction, and OpenTimestamps Bitcoin blockchain confirmation status.
+.TP
+.B stamp \fIfile\fR
+Anchors any file in the Bitcoin blockchain via OpenTimestamps, producing a detached \fI.ots\fR proof file.
+.SS Automation & Timers
+.TP
+.B timer setup [\fIdir\fR] [\-\-interval \fI2h\fR]
+Configures, enables, and starts a systemd user timer (\fBmedia-ots.timer\fR) that periodically scans the specified proofs folder and upgrades pending Bitcoin timestamp proofs. Defaults to \fB~/Seafile/Icons-Proofs\fR.
+.TP
+.B timer status
+Displays the active status, triggers, and execution history of the background systemd upgrade timer.
+.TP
+.B timer remove
+Disables and removes the background systemd timer and service units.
+.SS Keys & Vault
+.TP
+.B keys show
+Displays the active C2PA certificate information, issuer, validity period, and credential storage location (Bitwarden or local disk).
+.TP
+.B keys gen [\-d \fIdomain\fR] [\-\-bw \fIitem\fR]
+Generates a new ECDSA P-256 Root CA and Leaf End-Entity signing certificate chain. Can write to disk or directly into Bitwarden vault.
+.TP
+.B keys export
+Prints raw PEM blocks of the private key and certificate chain to standard output for secure backups.
+.TP
+.B keys push [\fIitem\fR]
+Uploads local signing keys directly into Bitwarden vault as a Secure Note.
+.SH OPTIONS
+.TP
+.BI \-m ", " \-\-master " file"
+Path to normalized square master image (PNG, WebP). Auto-detected if present in \fB01_source/master/\fR.
+.TP
+.BI \-r ", " \-\-raw " file"
+Path to original project canvas (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR). Auto-detected if present in \fB01_source/raw/\fR.
+.TP
+.BI \-d ", " \-\-dir " path"
+Base directory for the managed icons library (default: current directory if named \fIIcons\fR, \fB$SEAFILE_ICONS\fR, \fI~/Seafile/Icons\fR, \fB$SEADRIVE_ICONS\fR, or \fI~/SeaDrive/My Libraries/Icons\fR).
+.TP
+.BI \-p ", " \-\-proofs\-dir " path"
+Base directory for the separated OpenTimestamps proofs archive (default: sibling \fI<icons>-Proofs\fR, \fB$SEAFILE_PROOFS\fR, \fI~/Seafile/Icons\-Proofs\fR, \fB$SEADRIVE_PROOFS\fR, or \fI~/SeaDrive/My Libraries/Icons\-Proofs\fR).
+.TP
+.BI \-\-sizes " list"
+Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).
+.TP
+.BI \-\-bw ", " \-\-bw\-item " item"
+Retrieves C2PA signing private key and certificate chain directly from Bitwarden into RAM (0 disk writes). Default item: \fBc2pa-signer\fR.
+.TP
+.BI \-\-no\-sign
+Bypasses C2PA manifest signing and steganographic watermarking.
+.TP
+.BI \-\-no\-stamp
+Bypasses OpenTimestamps blockchain anchoring.
+.TP
+.BI \-\-force
+Forces re-building and re-stamping even if pre-flight audit reports mismatches.
+.TP
+.BI \-\-json
+Outputs raw structured inspection data in JSON format for scripting.
+.SH ENVIRONMENT
+.TP
+.B SEAFILE_ICONS
+Overrides default base directory for icons library.
+.TP
+.B SEAFILE_PROOFS
+Overrides default base directory for proofs archive.
+.TP
+.B BW_SESSION
+Bitwarden vault session token used for in-memory credential loading.
+.TP
+.B C2PA_PRIVATE_KEY
+Raw PEM private key passed via environment.
+.TP
+.B C2PA_CERT
+Raw PEM certificate chain passed via environment.
+.SH EXAMPLES
+.PP
+.B Build new icon version from sources:
+.RS
+.nf
+media init duck v1
+# (place duck.xcf in 01_source/raw/ and duck_crop.png in 01_source/master/)
+media build duck v1 --bw
+media audit duck v1
+.fi
+.RE
+.PP
+.B Sign individual image with Bitwarden keys and Bitcoin timestamp:
+.RS
+.nf
+media sign --bw --stamp hero_banner.png
+media verify hero_banner_signed.png
+.fi
+.RE
+.PP
+.B Configure automated Bitcoin proof upgrade timer on remote server:
+.RS
+.nf
+media timer setup /home/apps/data/Icons-Proofs --interval 2h
+media timer status
+.fi
+.RE
+.SH SEE ALSO
+.BR ots (1),
+.BR seaf-cli (1)

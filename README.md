@@ -135,5 +135,5 @@ Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are i
 | `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
 | `backup-seafile` | `server/backup_seafile.sh` | **Server** | Automated encrypted incremental backup from Seafile (WebDAV/FUSE) to Google Drive. | Bash, `rclone`, `systemd` |
 | `backup-seadrive` | `desktop/backup_seadrive.sh` | **Desktop** | Automated encrypted incremental backup from SeaDrive to Google Drive via Rclone. | Bash, `rclone`, `systemd` |
-| `sign-image` | `media/sign_image.py` | **Media** | Signs images with C2PA manifests, DWT steganographic marks, and OpenTimestamps. | Python $\ge$ 3.11, `uv` |
+| `media` | `media/media.py` | **Media** | Unified media lifecycle: C2PA attestation, DWT steganography, Bitcoin timestamps & asset packaging. | Python $\ge$ 3.11, `uv` |
 

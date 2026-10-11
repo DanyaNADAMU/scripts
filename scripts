@@ -97,7 +97,7 @@ check_dependencies() {
                     log_ok "'uv' installed successfully into $target_dir."
                 fi
             else
-                log_warn "uv auto-install failed. Media tools (sign-image, build-image) may require uv to run."
+                log_warn "uv auto-install failed. Media tool (media) may require uv to run."
             fi
         else
             log_ok "Dependency check: 'uv' is available."
@@ -720,15 +720,14 @@ cmd_uninstall() {
         uninstall_man_and_completions "scripts"
     else
         if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
-            sudo rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/build-image" "$BIN_DIR/backup-seafile" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
+            sudo rm -f "$BIN_DIR/setup-user" "$BIN_DIR/media" "$BIN_DIR/backup-seafile" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
         else
-            rm -f "$BIN_DIR/setup-user" "$BIN_DIR/sign-image" "$BIN_DIR/build-image" "$BIN_DIR/backup-seafile" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
+            rm -f "$BIN_DIR/setup-user" "$BIN_DIR/media" "$BIN_DIR/backup-seafile" "$BIN_DIR/backup-seadrive" "$BIN_DIR/scripts"
         fi
         uninstall_man_and_completions "backup-seafile"
         uninstall_man_and_completions "backup-seadrive"
         uninstall_man_and_completions "setup-user"
-        uninstall_man_and_completions "sign-image"
-        uninstall_man_and_completions "build-image"
+        uninstall_man_and_completions "media"
         uninstall_man_and_completions "scripts"
     fi
 

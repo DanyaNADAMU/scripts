@@ -4,7 +4,6 @@
 # ==============================================================================
 server/setup_user.sh:setup-user:server:Provision Linux user with Zsh, SSH key, and rootless Podman
 server/backup_seafile.sh:backup-seafile:server:Encrypted incremental backup from Seafile to Google Drive via Rclone
-media/sign_image.py:sign-image:media:Multi-layer media signing with C2PA, invisible watermarks & OpenTimestamps
-media/build_image.py:build-image:media:Structured media asset pipeline with audit, C2PA signing, and multi-scale dist rendering
+media/media.py:media:media:Media asset pipeline, C2PA attestation & Bitcoin OpenTimestamps lifecycle
 desktop/backup_seadrive.sh:backup-seadrive:desktop:Encrypted incremental backup from SeaDrive to Google Drive via Rclone
 

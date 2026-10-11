@@ -1,0 +1,113 @@
+# Bash completion for media
+_media_completions() {
+    local cur prev commands cmd icons_dir
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="init build audit list upgrade sign verify stamp timer keys -h --help"
+
+    for cand in "${SEAFILE_ICONS}" "$HOME/Seafile/Icons" "${SEADRIVE_ICONS}" "$HOME/SeaDrive/My Libraries/Icons"; do
+        if [ -n "$cand" ] && [ -d "$cand" ]; then
+            icons_dir="$cand"
+            break
+        fi
+    done
+    [ -z "$icons_dir" ] && icons_dir="$HOME/.local/share/icons-archive"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    cmd="${COMP_WORDS[1]}"
+
+    case "$prev" in
+        -m|--master|-r|--raw)
+            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|xcf|psd|ai|tiff)" -- "$cur") )
+            return 0
+            ;;
+        -d|--dir|-p|--proofs-dir|setup)
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+            ;;
+        -o|--output|--key|--cert|--ots)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+        --sizes|--bw-item|-s|--secret|-w|--watermark|-t|--title|-a|--author|--interval)
+            return 0
+            ;;
+    esac
+
+    case "$cmd" in
+        init)
+            local opts="-d --dir -p --proofs-dir -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        build)
+            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --bw --bw-item --no-sign --no-stamp --force -h --help"
+            if [ -d "$icons_dir" ]; then
+                local assets
+                assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
+                COMPREPLY=( $(compgen -W "$opts $assets" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            fi
+            return 0
+            ;;
+        audit)
+            local opts="-d --dir -p --proofs-dir -h --help"
+            if [ -d "$icons_dir" ]; then
+                local assets
+                assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
+                COMPREPLY=( $(compgen -W "$opts $assets" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            fi
+            return 0
+            ;;
+        upgrade)
+            local opts="-d --dir -p --proofs-dir -h --help"
+            if [ -d "$icons_dir" ]; then
+                local assets
+                assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
+                COMPREPLY=( $(compgen -W "$opts $assets" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            fi
+            return 0
+            ;;
+        list)
+            local opts="-d --dir -p --proofs-dir -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        sign)
+            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description -l --license -w --watermark --no-watermark --no-c2pa --stamp -s --secret --key --cert --bw --bw-item -h --help"
+            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        verify)
+            local opts="--ots -s --secret --bw --bw-item --json -h --help"
+            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        stamp)
+            local opts="-f --force --wait -h --help"
+            COMPREPLY=( $(compgen -f -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        timer)
+            local subcmds="setup status remove -h --help"
+            COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            return 0
+            ;;
+        keys)
+            local subcmds="show gen export push -h --help"
+            COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            return 0
+            ;;
+    esac
+}
+
+complete -F _media_completions media
