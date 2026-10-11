@@ -141,6 +141,15 @@ def load_config() -> dict[str, Any]:
     return default_cfg
 
 
+def save_config(cfg: dict[str, Any]) -> None:
+    """Saves user configuration to ~/.config/nadamu/c2pa.json."""
+    try:
+        DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        DEFAULT_CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    except Exception as e:
+        log_warn(f"Failed to save {DEFAULT_CONFIG_FILE}: {e}")
+
+
 def get_default_secret() -> str:
     """Returns a deterministic watermark secret based on machine/user identity."""
     salt = os.environ.get("C2PA_WATERMARK_SECRET")
@@ -1659,6 +1668,7 @@ def keys_show(bw_item: str | None = None) -> None:
 
     if target_bw:
         print(f"  {C_BOLD}Source:{C_RESET}      Bitwarden Vault (In-Memory)")
+        print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
         print(f"  {C_BOLD}Item:{C_RESET}        {target_bw}")
         try:
             k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
@@ -1676,9 +1686,13 @@ def keys_show(bw_item: str | None = None) -> None:
         return
 
     print(f"  {C_BOLD}Source:{C_RESET}      Local Disk Storage")
+    print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
     print(f"  {C_BOLD}Key File:{C_RESET}    {DEFAULT_KEY_PATH} ({'Found' if DEFAULT_KEY_PATH.is_file() else 'Missing'})")
     print(f"  {C_BOLD}Cert File:{C_RESET}   {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
-    print()
+    print(f"\n  {C_CYAN}To migrate to Bitwarden:{C_RESET}")
+    print(f"    1. export BW_SESSION=$(bw unlock --raw)")
+    print(f"    2. media keys push c2pa-signer")
+    print(f"    3. rm -rf {DEFAULT_KEY_DIR}\n")
 
 
 def keys_export(bw_item: str | None = None) -> None:
@@ -1704,6 +1718,10 @@ def keys_gen(domain: str = DEFAULT_DOMAIN, bw_item: str | None = None, out_dir: 
         log_head(f"Generating C2PA credentials directly in Bitwarden vault: '{bw_item}'...")
         k_bytes, c_bytes = generate_c2pa_credentials(domain)
         save_credentials_to_bitwarden(bw_item, k_bytes, c_bytes, domain)
+        cfg = load_config()
+        cfg["bitwarden_item"] = bw_item
+        save_config(cfg)
+        log_ok(f"Configured Bitwarden item '{bw_item}' as default signing source in {DEFAULT_CONFIG_FILE}.")
     else:
         target_dir = out_dir or DEFAULT_KEY_DIR
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1718,11 +1736,34 @@ def keys_gen(domain: str = DEFAULT_DOMAIN, bw_item: str | None = None, out_dir: 
 def keys_push(item_name: str) -> None:
     """Pushes local credentials directly into Bitwarden vault as a Secure Note."""
     if not DEFAULT_KEY_PATH.is_file() or not DEFAULT_CERT_PATH.is_file():
-        log_err("Local credentials not found in ~/.config/nadamu/c2pa/ to push.")
+        log_err(f"Local credentials not found in {DEFAULT_KEY_DIR} to push.")
         sys.exit(1)
     k_bytes = DEFAULT_KEY_PATH.read_bytes()
     c_bytes = DEFAULT_CERT_PATH.read_bytes()
     save_credentials_to_bitwarden(item_name, k_bytes, c_bytes, DEFAULT_DOMAIN)
+    cfg = load_config()
+    cfg["bitwarden_item"] = item_name
+    save_config(cfg)
+    log_ok(f"Configured Bitwarden item '{item_name}' as default signing source in {DEFAULT_CONFIG_FILE}.")
+    print(f"\n  {C_GREEN}Credentials successfully mirrored into Bitwarden vault!{C_RESET}")
+    print(f"  To enforce zero-disk-storage, you may now delete local keys:")
+    print(f"    {C_BOLD}rm -rf {DEFAULT_KEY_DIR}{C_RESET}\n")
+
+
+def keys_use(item_name: str | None = None) -> None:
+    """Configures default Bitwarden vault item or reverts to local disk storage."""
+    cfg = load_config()
+    if not item_name or item_name.lower() in ("local", "disk", "none"):
+        cfg["bitwarden_item"] = None
+        save_config(cfg)
+        log_ok(f"Reverted signing credentials source to local disk in {DEFAULT_CONFIG_FILE}.")
+        return
+
+    # Verify we can fetch the item
+    fetch_bitwarden_credentials(item_name)
+    cfg["bitwarden_item"] = item_name
+    save_config(cfg)
+    log_ok(f"Configured Bitwarden item '{item_name}' as default signing source in {DEFAULT_CONFIG_FILE}.")
 
 
 # ------------------------------------------------------------------------------
@@ -1855,6 +1896,8 @@ Automation & Keys Examples:
     p_k_exp.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Export from Bitwarden vault")
     p_k_push = sub_keys.add_parser("push", help="Push local keys to Bitwarden vault as Secure Note")
     p_k_push.add_argument("item", type=str, default=DEFAULT_BW_ITEM, nargs="?", help="Bitwarden item name")
+    p_k_use = sub_keys.add_parser("use", help="Configure default Bitwarden item (or 'local' for disk)")
+    p_k_use.add_argument("item", type=str, nargs="?", default=DEFAULT_BW_ITEM, help="Bitwarden item name (or 'local')")
 
     # Shortcut handling: if first arg is an existing file, default to 'verify'
     args_list = sys.argv[1:]
@@ -2017,6 +2060,8 @@ Automation & Keys Examples:
             keys_export(bw_item=args.bw_item)
         elif action == "push":
             keys_push(item_name=args.item)
+        elif action == "use":
+            keys_use(item_name=args.item)
 
 
 if __name__ == "__main__":

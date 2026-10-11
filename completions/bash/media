@@ -103,7 +103,7 @@ _media_completions() {
             return 0
             ;;
         keys)
-            local subcmds="show gen export push -h --help"
+            local subcmds="show gen export push use -h --help"
             COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
             return 0
             ;;

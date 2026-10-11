@@ -135,7 +135,10 @@ Generates a new ECDSA P-256 Root CA and Leaf End-Entity signing certificate chai
 Prints raw PEM blocks of the private key and certificate chain to standard output for secure backups.
 .TP
 .B keys push [\fIitem\fR]
-Uploads local signing keys directly into Bitwarden vault as a Secure Note.
+Uploads local signing keys directly into Bitwarden vault as a Secure Note and sets it as the default vault item.
+.TP
+.B keys use [\fIitem\fR]
+Configures the default Bitwarden vault item to load signing credentials from (pass \fIlocal\fR to revert to disk).
 .SH OPTIONS
 .TP
 .BI \-m ", " \-\-master " file"

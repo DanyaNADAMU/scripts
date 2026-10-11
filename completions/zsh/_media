@@ -125,6 +125,7 @@ _media() {
                         'gen:Generate or regenerate C2PA signing credentials'
                         'export:Export private key and cert in PEM format'
                         'push:Push local keys to Bitwarden vault as Secure Note'
+                        'use:Configure default Bitwarden item (or local for disk)'
                     )
                     _describe -t keys_cmds 'keys operation' keys_cmds
                     ;;
