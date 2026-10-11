@@ -69,7 +69,7 @@ DEFAULT_CERT_PATH = DEFAULT_KEY_DIR / "es256_certs.pem"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "c2pa.json"
 
 DEFAULT_DOMAIN = "nada.mu"
-DEFAULT_AUTHOR = "DanyaNADAMU <git@nada.mu>"
+DEFAULT_AUTHOR = "DanyaNADAMU <danya@nada.mu>"
 DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 DEFAULT_WATERMARK = "NADAMU"
