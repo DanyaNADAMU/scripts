@@ -9,6 +9,7 @@ build-image \- structured media asset pipeline with audit, C2PA signing, and mul
 .BI \-m " master"
 .RB [ \-r " raw" ]
 .RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
 .RB [ \-\-sizes " sizes" ]
 .RB [ \-\-bw " [" \fIitem\fR ]]
 .RB [ \-\-bw\-item " item" ]
@@ -20,14 +21,17 @@ build-image \- structured media asset pipeline with audit, C2PA signing, and mul
 .RI [ name ]
 .RI [ version ]
 .RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
 .br
 .B build-image upgrade
 .RI [ name ]
 .RI [ version ]
 .RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
 .br
 .B build-image list
 .RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
 .SH DESCRIPTION
 \fBbuild-image\fR implements an automated, structured asset generation and lifecycle management pipeline for icons, logos, and graphic resources.
 It enforces strict provenance tracking, non-destructive versioning, and zero-overhead distribution across a standardized 3-tier hierarchy:
@@ -72,6 +76,9 @@ Path to original uncropped project canvas or raw work file (\fI.xcf\fR, \fI.psd\
 .BI \-d ", " \-\-dir " path"
 Base directory for the managed icons library (default: \fB$SEADRIVE_ICONS\fR or \fI~/SeaDrive/My Libraries/Icons\fR).
 .TP
+.BI \-p ", " \-\-proofs\-dir " path"
+Base directory for the separated OpenTimestamps proofs library (default: \fB$SEADRIVE_PROOFS\fR or \fI~/SeaDrive/My Libraries/Icons\-Proofs\fR). When set, all \fI.ots\fR files are segregated into this archive, keeping media libraries free of blockchain artifacts and allowing zero-media proof synchronization on remote servers.
+.TP
 .BI \-\-sizes " list"
 Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).
 .TP
@@ -91,6 +98,9 @@ Bypasses pre-flight audit mismatch aborts and forces recalculation of OpenTimest
 .B SEADRIVE_ICONS
 Path to the base directory of the icons library. Overrides standard default paths.
 .TP
+.B SEADRIVE_PROOFS
+Path to the base directory of the segregated proofs library. Overrides standard default paths.
+.TP
 .B BW_SESSION
 Active Bitwarden vault unlock session key required for \fB\-\-bw\fR.
 .TP
@@ -100,6 +110,9 @@ Default Bitwarden vault item name for signing credentials.
 .TP
 .I ~/SeaDrive/My Libraries/Icons/
 Default location for the managed asset library in SeaDrive.
+.TP
+.I ~/SeaDrive/My Libraries/Icons-Proofs/
+Default location for the segregated proofs archive in SeaDrive.
 .SH AUTHORS
 Maintained by DanyaNADAMU <git@nada.mu>.
 .SH SEE ALSO

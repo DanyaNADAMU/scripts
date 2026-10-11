@@ -20,7 +20,7 @@ _build_image_completions() {
             COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|xcf|psd|ai|tiff)" -- "$cur") )
             return 0
             ;;
-        -d|--dir)
+        -d|--dir|-p|--proofs-dir)
             COMPREPLY=( $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -31,12 +31,12 @@ _build_image_completions() {
 
     case "$cmd" in
         build)
-            local opts="-m --master -r --raw -d --dir --sizes --bw --bw-item --no-sign --no-stamp --force-re-stamp -h --help"
+            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --bw --bw-item --no-sign --no-stamp --force-re-stamp -h --help"
             COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
             return 0
             ;;
         audit|upgrade)
-            local opts="-d --dir -h --help"
+            local opts="-d --dir -p --proofs-dir -h --help"
             if [ -d "$icons_dir" ]; then
                 local assets
                 assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
@@ -47,7 +47,7 @@ _build_image_completions() {
             return 0
             ;;
         list)
-            local opts="-d --dir -h --help"
+            local opts="-d --dir -p --proofs-dir -h --help"
             COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
             return 0
             ;;

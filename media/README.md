@@ -42,20 +42,30 @@ Structured media asset pipeline for icons, logos, and UI graphics across version
 └── <asset_name>/
     ├── v1/
     │   ├── 01_source/
-    │   │   ├── raw/      # duck.xcf (0444 + .ots)
-    │   │   └── master/   # duck_crop_master.png (0444 + .ots)
+    │   │   ├── raw/      # duck.xcf (0444 + optional .ots)
+    │   │   └── master/   # duck_crop_master.png (0444 + optional .ots)
     │   ├── 02_signed/
-    │   │   └── duck_1024_signed.png (C2PA + Watermark + .ots)
+    │   │   └── duck_1024_signed.png (C2PA + Watermark + optional .ots)
     │   └── 03_dist/
     │       ├── favicon.ico          # Multi-layer 16..256 container
     │       ├── duck_512.webp / .png # Clean, zero overhead
     │       ├── duck_256.webp / .png
     │       └── ... (128, 64, 32)
     └── latest -> v1/
+
+# Optional Segregated Proofs Archive (<Icons-Proofs>/ or $SEADRIVE_PROOFS):
+<Icons-Proofs>/
+└── <asset_name>/
+    ├── v1/
+    │   ├── 01_source/raw/duck.xcf.ots
+    │   ├── 01_source/master/duck_crop_master.png.ots
+    │   └── 02_signed/duck_1024_signed.png.ots
+    └── latest -> v1/
 ```
 
 #### Key Features:
 * **Source Protection:** Immutable original canvas and master files locked with `chmod 0444` and anchored in Bitcoin.
+* **Segregated Proofs Archive:** Isolate `.ots` files into an independent repository (`--proofs-dir` / `$SEADRIVE_PROOFS`). This allows running `seaf-cli` and automated Bitcoin timers on remote servers with 100% zero-media exposure (only 1 MB of Merkle trees synced, zero images on server).
 * **Showcase Attestation:** 1024x1024 release signed cryptographically via C2PA, watermark, and OTS.
 * **Clean Distribution:** Multi-scale WebP/PNG downscales and multi-layer ICO without metadata bloating.
 * **Non-Blocking Audit:** Full diagnostic pass (`build-image audit`) reporting all hash mismatches, missing proofs, and orphaned files at once.
@@ -63,14 +73,17 @@ Structured media asset pipeline for icons, logos, and UI graphics across version
 
 #### Usage:
 ```bash
-# Build a new icon version from master and raw canvas
+# Build a new icon version with in-place proofs
 build-image build duck v1 --master duck_crop.png --raw duck.xcf
+
+# Build with segregated proofs library (Zero media files on server)
+build-image build duck v1 --master duck_crop.png --raw duck.xcf --proofs-dir ~/SeaDrive/"My Libraries"/Icons-Proofs
 
 # Build with Bitwarden in-memory signing
 build-image build duck v2 --master duck_crop.png --bw-item c2pa-signer
 
 # Run full non-blocking integrity audit across all assets
-build-image audit
+build-image audit --proofs-dir ~/SeaDrive/"My Libraries"/Icons-Proofs
 
 # Recursively upgrade OTS proofs for a specific asset version
 build-image upgrade duck v1

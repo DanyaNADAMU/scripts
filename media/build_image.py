@@ -83,6 +83,20 @@ def get_default_icons_dir() -> Path:
     return (Path.home() / ".local" / "share" / "icons-archive").resolve()
 
 
+def get_default_proofs_dir() -> Path | None:
+    """Resolves base directory for separated OpenTimestamps proofs library."""
+    env_dir = os.environ.get("SEADRIVE_PROOFS")
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+    cand = Path.home() / "SeaDrive" / "My Libraries" / "Icons-Proofs"
+    if cand.is_dir():
+        return cand
+    cand_alt = Path.home() / "SeaDrive" / "My Libraries" / "Proofs"
+    if cand_alt.is_dir():
+        return cand_alt
+    return None
+
+
 def inspect_ots(target_file: Path, ots_path: Path | None = None) -> dict[str, Any] | None:
     """Inspects an OpenTimestamps proof against target file."""
     candidate_ots = ots_path
@@ -152,43 +166,58 @@ def inspect_ots(target_file: Path, ots_path: Path | None = None) -> dict[str, An
 # ------------------------------------------------------------------------------
 # Batch Audit & Integrity Validation
 # ------------------------------------------------------------------------------
-def run_audit(target_dir: Path) -> tuple[int, list[dict[str, str]]]:
+def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, list[dict[str, str]]]:
     """Runs a full non-blocking diagnostic pass over an asset or version tree."""
     violations: list[dict[str, str]] = []
 
-    # Find all source files and all ots files
-    ots_files = list(target_dir.rglob("*.ots"))
-    media_files = [
-        f for f in target_dir.rglob("*")
-        if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
-    ]
+    # Map of proof file -> expected target media file
+    all_ots_map: dict[Path, Path] = {}
 
-    # 1. Check every OTS file for valid matching target
-    for ots in ots_files:
-        base_name = ots.name[:-4]  # strip .ots
-        parent = ots.parent
-        expected_target = parent / base_name
+    # 1. From external proofs_dir if provided
+    if proofs_dir and proofs_dir.is_dir():
+        for ots in proofs_dir.rglob("*.ots"):
+            rel = ots.relative_to(proofs_dir)
+            base_name = ots.name[:-4]
+            expected_target = target_dir / rel.parent / base_name
+            all_ots_map[ots] = expected_target
+
+    # 2. In-place proofs within target_dir
+    if target_dir.is_dir():
+        for ots in target_dir.rglob("*.ots"):
+            base_name = ots.name[:-4]
+            expected_target = ots.parent / base_name
+            all_ots_map[ots] = expected_target
+
+    # 3. Check every OTS proof
+    for ots, expected_target in all_ots_map.items():
+        base_name = ots.name[:-4]
+        is_external = proofs_dir and (proofs_dir == ots.parent or proofs_dir in ots.parents)
+        display_path = (
+            f"[proofs] {ots.relative_to(proofs_dir)}" if is_external
+            else str(ots.relative_to(target_dir))
+        )
 
         if not expected_target.is_file():
             violations.append({
-                "path": str(ots.relative_to(target_dir)),
+                "path": display_path,
                 "type": "ORPHAN_PROOF",
                 "severity": "ERROR",
-                "desc": f"Orphaned .ots timestamp proof without source file '{base_name}'.",
+                "desc": f"Orphaned .ots timestamp proof without media file '{base_name}'.",
             })
             continue
 
         res = inspect_ots(expected_target, ots)
+        target_display = str(expected_target.relative_to(target_dir))
         if not res:
             violations.append({
-                "path": str(ots.relative_to(target_dir)),
+                "path": target_display,
                 "type": "CORRUPT_PROOF",
                 "severity": "ERROR",
-                "desc": "Failed to deserialize or parse .ots proof file.",
+                "desc": f"Failed to deserialize or parse .ots proof file '{ots.name}'.",
             })
         elif res["status"] == "mismatch":
             violations.append({
-                "path": str(expected_target.relative_to(target_dir)),
+                "path": target_display,
                 "type": "HASH_MISMATCH",
                 "severity": "CRITICAL",
                 "desc": (
@@ -197,13 +226,13 @@ def run_audit(target_dir: Path) -> tuple[int, list[dict[str, str]]]:
                 ),
             })
 
-    # 2. Check 01_source files for missing OTS
+    # 4. Check 01_source files for missing OTS
     src_dir = target_dir / "01_source"
     if src_dir.is_dir():
+        target_files_checked = set(all_ots_map.values())
         for f in src_dir.rglob("*"):
-            if f.is_file() and not f.name.endswith(".ots"):
-                ots_cand = f.with_name(f"{f.name}.ots")
-                if not ots_cand.is_file():
+            if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith("."):
+                if f not in target_files_checked:
                     violations.append({
                         "path": str(f.relative_to(target_dir)),
                         "type": "MISSING_PROOF",
@@ -241,6 +270,7 @@ def execute_build(
     master_path: Path,
     raw_path: Path | None = None,
     base_dir: Path | None = None,
+    proofs_dir: Path | None = None,
     sizes: list[int] | None = None,
     bw_item: str | None = None,
     no_sign: bool = False,
@@ -256,6 +286,7 @@ def execute_build(
         sys.exit(1)
 
     icons_dir = base_dir or get_default_icons_dir()
+    resolved_proofs_dir = proofs_dir or get_default_proofs_dir()
     target_dir = icons_dir / name / version
     src_dir = target_dir / "01_source"
     raw_dest_dir = src_dir / "raw"
@@ -263,15 +294,24 @@ def execute_build(
     signed_dir = target_dir / "02_signed"
     dist_dir = target_dir / "03_dist"
 
+    target_proofs_dir = None
+    if resolved_proofs_dir:
+        target_proofs_dir = resolved_proofs_dir / name / version
+        (target_proofs_dir / "01_source" / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "01_source" / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "02_signed").mkdir(parents=True, exist_ok=True)
+
     log_head(f"Building Media Asset: {name} ({version})")
     log_info(f"Target Directory: {target_dir}")
+    if target_proofs_dir:
+        log_info(f"Proofs Archive:   {target_proofs_dir}")
     log_info(f"Master Image:     {master_path}")
     if raw_path:
         log_info(f"Raw Project:      {raw_path}")
 
     # 1. Pre-flight Audit if target directory already exists
     if target_dir.is_dir():
-        err_count, violations = run_audit(target_dir)
+        err_count, violations = run_audit(target_dir, target_proofs_dir)
         if err_count > 0 and not force_re_stamp:
             print_audit_report(name, version, violations)
             log_err(
@@ -293,12 +333,19 @@ def execute_build(
         if dest_raw.resolve() != raw_path.resolve():
             shutil.copyfile(raw_path, dest_raw)
         if not no_stamp and sign_image_bin:
-            ots_file = dest_raw.with_name(f"{dest_raw.name}.ots")
-            if not ots_file.is_file() or force_re_stamp:
+            local_ots = dest_raw.with_name(f"{dest_raw.name}.ots")
+            final_ots = (
+                (target_proofs_dir / "01_source" / "raw" / f"{dest_raw.name}.ots")
+                if target_proofs_dir
+                else local_ots
+            )
+            if not final_ots.is_file() or force_re_stamp:
                 log_info(f"Stamping raw canvas '{raw_path.name}' in Bitcoin blockchain...")
                 subprocess.run([sign_image_bin, "stamp", str(dest_raw)], check=True)
-                if ots_file.is_file():
-                    ots_file.chmod(0o444)
+                if target_proofs_dir and local_ots.is_file():
+                    shutil.move(local_ots, final_ots)
+                if final_ots.is_file():
+                    final_ots.chmod(0o444)
         dest_raw.chmod(0o444)
         log_ok(f"Raw canvas secured: {dest_raw.name} (0444)")
 
@@ -307,12 +354,19 @@ def execute_build(
     if dest_master.resolve() != master_path.resolve():
         shutil.copyfile(master_path, dest_master)
     if not no_stamp and sign_image_bin:
-        ots_file = dest_master.with_name(f"{dest_master.name}.ots")
-        if not ots_file.is_file() or force_re_stamp:
+        local_ots = dest_master.with_name(f"{dest_master.name}.ots")
+        final_ots = (
+            (target_proofs_dir / "01_source" / "master" / f"{dest_master.name}.ots")
+            if target_proofs_dir
+            else local_ots
+        )
+        if not final_ots.is_file() or force_re_stamp:
             log_info(f"Stamping cropped master '{dest_master.name}' in Bitcoin blockchain...")
             subprocess.run([sign_image_bin, "stamp", str(dest_master)], check=True)
-            if ots_file.is_file():
-                ots_file.chmod(0o444)
+            if target_proofs_dir and local_ots.is_file():
+                shutil.move(local_ots, final_ots)
+            if final_ots.is_file():
+                final_ots.chmod(0o444)
     dest_master.chmod(0o444)
     log_ok(f"Normalized master secured: {dest_master.name} (0444)")
 
@@ -341,6 +395,12 @@ def execute_build(
             log_warn("sign-image signing returned non-zero code; fallback to raw copy.")
             shutil.copyfile(showcase_tmp, signed_target)
         showcase_tmp.unlink(missing_ok=True)
+        # Relocate OTS to proofs_dir if segregated
+        local_showcase_ots = signed_target.with_name(f"{signed_target.name}.ots")
+        if target_proofs_dir and local_showcase_ots.is_file():
+            final_showcase_ots = target_proofs_dir / "02_signed" / f"{signed_target.name}.ots"
+            shutil.move(local_showcase_ots, final_showcase_ots)
+            final_showcase_ots.chmod(0o444)
         log_ok(f"Showcase release signed: {signed_target.name}")
     else:
         shutil.move(showcase_tmp, signed_target)
@@ -371,7 +431,7 @@ def execute_build(
 
     log_ok(f"Generated {len(target_sizes) * 2 + 1} distribution files in {dist_dir.name}/")
 
-    # 6. Stage 5: Update 'latest' Symlink
+    # 6. Stage 5: Update 'latest' Symlinks
     latest_symlink = icons_dir / name / "latest"
     try:
         if latest_symlink.is_symlink() or latest_symlink.exists():
@@ -381,10 +441,22 @@ def execute_build(
     except Exception as e:
         log_warn(f"Could not update symlink 'latest': {e}")
 
+    if resolved_proofs_dir:
+        proofs_latest = resolved_proofs_dir / name / "latest"
+        try:
+            if proofs_latest.is_symlink() or proofs_latest.exists():
+                proofs_latest.unlink()
+            proofs_latest.symlink_to(version)
+            log_ok(f"Updated proofs pointer: {name}/latest -> {version}")
+        except Exception as e:
+            log_warn(f"Could not update proofs symlink 'latest': {e}")
+
     log_head(f"Build Complete for '{name}' ({version})")
     print(f"  {C_BOLD}Source:{C_RESET}     {src_dir}")
     print(f"  {C_BOLD}Signed:{C_RESET}     {signed_dir}")
     print(f"  {C_BOLD}Dist:{C_RESET}       {dist_dir}")
+    if target_proofs_dir:
+        print(f"  {C_BOLD}Proofs:{C_RESET}     {target_proofs_dir}")
     print(f"  {C_BOLD}Active:{C_RESET}     {latest_symlink}\n")
 
 
@@ -416,6 +488,7 @@ Examples:
     p_build.add_argument("-m", "--master", type=Path, required=True, help="Normalized/cropped master square image (PNG/WEBP)")
     p_build.add_argument("-r", "--raw", type=Path, help="Original project canvas before cropping (XCF, PSD, SVG, RAW)")
     p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory (default: $SEADRIVE_ICONS)")
+    p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory (default: $SEADRIVE_PROOFS)")
     p_build.add_argument("--sizes", type=str, default="512,256,128,64,32", help="Comma-separated dist resolutions")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const="c2pa-signer", type=str, help="Bitwarden item name for C2PA credentials")
     p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA signing of showcase release")
@@ -427,16 +500,19 @@ Examples:
     p_audit.add_argument("name", type=str, nargs="?", help="Specific asset name to audit (optional)")
     p_audit.add_argument("version", type=str, nargs="?", help="Specific version to audit (optional)")
     p_audit.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
+    p_audit.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     # Command: upgrade
     p_up = subparsers.add_parser("upgrade", help="Recursively upgrade OpenTimestamps proofs in asset tree")
     p_up.add_argument("name", type=str, nargs="?", help="Asset name to upgrade")
     p_up.add_argument("version", type=str, nargs="?", help="Asset version to upgrade")
     p_up.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
+    p_up.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     # Command: list
     p_list = subparsers.add_parser("list", help="List managed assets and versions")
     p_list.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
+    p_list.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     args_list = sys.argv[1:]
     if args_list and args_list[0] not in ("build", "audit", "upgrade", "list", "-h", "--help"):
@@ -449,6 +525,7 @@ Examples:
         sys.exit(0)
 
     base_dir = args.dir or get_default_icons_dir()
+    proofs_base = getattr(args, "proofs_dir", None) or get_default_proofs_dir()
 
     if args.command == "build":
         try:
@@ -462,6 +539,7 @@ Examples:
             master_path=args.master,
             raw_path=args.raw,
             base_dir=base_dir,
+            proofs_dir=proofs_base,
             sizes=parsed_sizes,
             bw_item=args.bw_item,
             no_sign=args.no_sign,
@@ -472,7 +550,8 @@ Examples:
     elif args.command == "audit":
         if args.name and args.version:
             target = base_dir / args.name / args.version
-            err_count, violations = run_audit(target)
+            p_target = (proofs_base / args.name / args.version) if proofs_base else None
+            err_count, violations = run_audit(target, p_target)
             print_audit_report(args.name, args.version, violations)
             sys.exit(1 if err_count > 0 else 0)
         elif args.name:
@@ -480,7 +559,8 @@ Examples:
             total_err = 0
             for v_dir in sorted(asset_dir.iterdir()):
                 if v_dir.is_dir() and not v_dir.is_symlink():
-                    err_c, viols = run_audit(v_dir)
+                    p_target = (proofs_base / args.name / v_dir.name) if proofs_base else None
+                    err_c, viols = run_audit(v_dir, p_target)
                     print_audit_report(args.name, v_dir.name, viols)
                     total_err += err_c
             sys.exit(1 if total_err > 0 else 0)
@@ -493,7 +573,8 @@ Examples:
                 if a_dir.is_dir() and not a_dir.name.startswith("."):
                     for v_dir in sorted(a_dir.iterdir()):
                         if v_dir.is_dir() and not v_dir.is_symlink():
-                            err_c, viols = run_audit(v_dir)
+                            p_target = (proofs_base / a_dir.name / v_dir.name) if proofs_base else None
+                            err_c, viols = run_audit(v_dir, p_target)
                             print_audit_report(a_dir.name, v_dir.name, viols)
                             total_err += err_c
             sys.exit(1 if total_err > 0 else 0)
@@ -503,12 +584,13 @@ Examples:
         if not sign_bin:
             log_err("sign-image utility not found in PATH.")
             sys.exit(1)
+        search_base = proofs_base or base_dir
         if args.name and args.version:
-            target = base_dir / args.name / args.version
+            target = search_base / args.name / args.version
         elif args.name:
-            target = base_dir / args.name
+            target = search_base / args.name
         else:
-            target = base_dir
+            target = search_base
         subprocess.run([sign_bin, "stamp", "--upgrade", str(target)], check=False)
 
     elif args.command == "list":
@@ -516,6 +598,8 @@ Examples:
             log_info(f"Empty or missing library: {base_dir}")
             return
         log_head(f"Managed Asset Library: {base_dir}")
+        if proofs_base:
+            log_info(f"Proofs Archive:        {proofs_base}")
         for a_dir in sorted(base_dir.iterdir()):
             if a_dir.is_dir() and not a_dir.name.startswith("."):
                 versions = [v.name for v in sorted(a_dir.iterdir()) if v.is_dir() and not v.is_symlink()]
