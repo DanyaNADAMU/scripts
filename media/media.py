@@ -795,33 +795,13 @@ def timer_setup(target_dir: Path | None = None, interval: str = "2h") -> None:
     systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
     systemd_user_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean up obsolete legacy sign-image units if present
-    for old_name in ("sign-image-ots.timer", "sign-image-ots.service"):
-        old_file = systemd_user_dir / old_name
-        if old_file.exists():
-            if shutil.which("systemctl"):
-                subprocess.run(["systemctl", "--user", "disable", "--now", old_name], check=False, capture_output=True)
-            old_file.unlink(missing_ok=True)
-            log_ok(f"Cleaned up legacy timer unit: {old_name}")
-
     chosen_dir: Path
     if target_dir is None or str(target_dir) in ("DEFAULT", "None"):
-        for cand in [
-            Path.home() / "data" / "Icons-Proofs",
-            Path.home() / "Seafile" / "Icons-Proofs",
-            Path.home() / "SeaDrive" / "My Libraries" / "Icons-Proofs",
-            Path.home() / "data" / "Proofs",
-            Path.home() / "Seafile" / "Proofs",
-            Path.home() / "SeaDrive" / "My Libraries" / "Proofs",
-            Path.home() / "data" / "Icons",
-            Path.home() / "Seafile" / "Icons",
-            Path.home() / "SeaDrive" / "My Libraries" / "Icons",
-        ]:
-            if cand.is_dir():
-                chosen_dir = cand
-                break
+        proofs_cand = get_default_proofs_dir()
+        if proofs_cand and proofs_cand.is_dir():
+            chosen_dir = proofs_cand
         else:
-            chosen_dir = Path.home() / ".config" / "nadamu"
+            chosen_dir = get_default_icons_dir()
     else:
         chosen_dir = target_dir
 
@@ -884,14 +864,7 @@ def timer_status() -> None:
     if not shutil.which("systemctl"):
         log_err("systemctl command not found.")
         return
-    res = subprocess.run(["systemctl", "--user", "status", "media-ots.timer"], check=False)
-    if res.returncode != 0:
-        legacy_timer = Path.home() / ".config" / "systemd" / "user" / "sign-image-ots.timer"
-        if legacy_timer.exists():
-            print()
-            log_warn("Legacy 'sign-image-ots.timer' detected in ~/.config/systemd/user/.")
-            log_info("Migrate to the new unified media timer by running:")
-            print(f"    {C_CYAN}media timer setup{C_RESET}\n")
+    subprocess.run(["systemctl", "--user", "status", "media-ots.timer"], check=False)
 
 
 def timer_remove() -> None:
@@ -903,13 +876,10 @@ def timer_remove() -> None:
 
     if shutil.which("systemctl"):
         subprocess.run(["systemctl", "--user", "disable", "--now", "media-ots.timer"], check=False, capture_output=True)
-        subprocess.run(["systemctl", "--user", "disable", "--now", "sign-image-ots.timer"], check=False, capture_output=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, capture_output=True)
 
     timer_path.unlink(missing_ok=True)
     service_path.unlink(missing_ok=True)
-    (systemd_user_dir / "sign-image-ots.timer").unlink(missing_ok=True)
-    (systemd_user_dir / "sign-image-ots.service").unlink(missing_ok=True)
     log_ok("Systemd timer and service units removed.")
 
 

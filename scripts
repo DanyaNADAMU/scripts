@@ -425,19 +425,6 @@ cmd_list() {
     done < "$tmp_m"
 
     rm -f "$tmp_m"
-
-    # Check for any deprecated utilities still present
-    local dep_found=()
-    for k in "sign-image" "build-image"; do
-        if [ -f "$BIN_DIR/$k" ] || [ -L "$BIN_DIR/$k" ]; then
-            dep_found+=("$k")
-        fi
-    done
-    if [ ${#dep_found[@]} -gt 0 ]; then
-        echo ""
-        log_warn "Deprecated utilities detected in $BIN_DIR: ${dep_found[*]}"
-        echo "      Run 'scripts prune' or 'scripts uninstall ${dep_found[*]}' to clean them up."
-    fi
     echo ""
 }
 
@@ -616,7 +603,7 @@ cmd_sync() {
     printf "  \033[1m%-16s\033[0m %-10s %-12s %s\n" "scripts" "manager" "$scripts_status" "Unified manager for the nada.mu personal utilities ecosystem"
 
     # Check for Orphaned/Deprecated scripts
-    local deprecated_to_check=("sign-image" "build-image")
+    local deprecated_to_check=()
     if [ -f "$prev_manifest" ]; then
         while IFS=: read -r p_src p_cmd p_cat p_desc || [ -n "$p_src" ]; do
             [[ "$p_src" =~ ^#.*$ ]] && continue
@@ -714,7 +701,7 @@ Usage: scripts uninstall [OPTIONS] [UTILITY...]
 Remove installed utilities, man pages, shell completions, and metadata.
 
 Arguments:
-  UTILITY...           Specific utility name(s) to uninstall (e.g. sign-image, build-image).
+  UTILITY...           Specific utility name(s) to uninstall (e.g. media, backup-seadrive).
                        If omitted, prompts to uninstall all managed utilities.
 
 Options:
@@ -723,7 +710,7 @@ Options:
   -h, --help           Show this help message
 
 Examples:
-  scripts uninstall sign-image build-image   # Remove specific utilities and their assets
+  scripts uninstall media                    # Remove specific utility and its assets
   scripts uninstall                          # Complete uninstallation of all utilities
   scripts uninstall -y                       # Non-interactive complete uninstallation
 EOF
@@ -744,7 +731,7 @@ Options:
   -h, --help           Show this help message
 
 Examples:
-  scripts prune        # Scan and interactively remove deprecated tools (e.g. sign-image)
+  scripts prune        # Scan and interactively remove orphaned utilities
   scripts prune -y     # Non-interactive prune
 EOF
 }
@@ -786,7 +773,7 @@ cmd_prune() {
     tmp_manifest="$(mktemp)"
     load_manifest "$tmp_manifest"
 
-    local candidates=("sign-image" "build-image")
+    local candidates=()
 
     # Inspect local state manifest for any tools no longer in upstream manifest
     if [ -f "$manifest_file" ]; then
@@ -871,21 +858,6 @@ cmd_prune() {
         fi
         log_ok "Pruned: $item"
     done
-
-    # Clean up legacy user systemd timer if exists in user profile
-    local target_home="$HOME"
-    if [ -n "${SUDO_USER:-}" ] && [ "$EUID" -eq 0 ]; then
-        target_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || echo "$HOME")"
-    fi
-    local user_sysd="$target_home/.config/systemd/user"
-    if [ -f "$user_sysd/sign-image-ots.timer" ] || [ -f "$user_sysd/sign-image-ots.service" ]; then
-        if command -v systemctl &>/dev/null; then
-            systemctl --user disable --now sign-image-ots.timer 2>/dev/null || true
-            systemctl --user daemon-reload 2>/dev/null || true
-        fi
-        rm -f "$user_sysd/sign-image-ots.timer" "$user_sysd/sign-image-ots.service" 2>/dev/null || true
-        log_ok "Removed legacy user systemd unit: sign-image-ots.timer"
-    fi
 
     log_ok "Cleanup complete. All deprecated utilities and assets have been removed."
 }
@@ -1010,22 +982,14 @@ cmd_uninstall() {
             log_ok "Removed: $cmd_name"
         done < "$manifest_file"
 
-        # Also purge known deprecated tools
-        for dep in "sign-image" "build-image"; do
-            $cmd_prefix rm -f "$BIN_DIR/$dep"
-            uninstall_man_and_completions "$dep"
-        done
-
         $cmd_prefix rm -rf "$STATE_DIR" "$BIN_DIR/scripts"
         uninstall_man_and_completions "scripts"
     else
-        $cmd_prefix rm -f "$BIN_DIR/setup-user" "$BIN_DIR/media" "$BIN_DIR/backup-seafile" "$BIN_DIR/backup-seadrive" "$BIN_DIR/sign-image" "$BIN_DIR/build-image" "$BIN_DIR/scripts"
-        uninstall_man_and_completions "backup-seafile"
-        uninstall_man_and_completions "backup-seadrive"
-        uninstall_man_and_completions "setup-user"
-        uninstall_man_and_completions "media"
-        uninstall_man_and_completions "sign-image"
-        uninstall_man_and_completions "build-image"
+        for tool in "setup-user" "media" "backup-seafile" "backup-seadrive"; do
+            $cmd_prefix rm -f "$BIN_DIR/$tool"
+            uninstall_man_and_completions "$tool"
+        done
+        $cmd_prefix rm -f "$BIN_DIR/scripts"
         uninstall_man_and_completions "scripts"
     fi
 
@@ -1158,8 +1122,8 @@ Examples:
   scripts update                          # Update all utilities (auto-scope, zero-prompt)
   scripts update --category server        # Update server utilities only
   sudo scripts update --scope system      # System-wide update in /usr/local/bin
-  scripts prune                           # Scan and clean up deprecated utilities
-  scripts uninstall sign-image build-image # Remove specific obsolete utilities
+  scripts prune                           # Scan and clean up orphaned utilities
+  scripts uninstall media                 # Remove specific utility
   scripts autoupdate status               # Check automated update status
   scripts list                            # View available tools and statuses
 EOF

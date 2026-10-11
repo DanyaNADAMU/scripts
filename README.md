@@ -21,7 +21,7 @@ scripts/
 │
 ├── docs/                    # Documentation & man pages
 │   ├── STANDARDS.md         # Engineering & documentation standards
-│   └── man/man1/            # Troff Linux man pages (setup-user.1, scripts.1)
+│   └── man/man1/            # Troff Linux man pages (media.1, setup-user.1, scripts.1)
 │
 ├── completions/             # Shell tab-completions
 │   ├── bash/                # Bash completions
@@ -30,13 +30,12 @@ scripts/
 ├── server/                  # Server-side administration & provisioning
 │   ├── setup_user.sh        # Linux user provisioning with rootless Podman
 │   └── backup_seafile.sh    # Resilient encrypted Seafile to Google Drive backup
-
 │
 ├── desktop/                 # Workstation & desktop environment scripts
 │   └── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
 │
 └── media/                   # Cryptographic media & attestation tools
-    └── sign_image.py        # C2PA manifest signing & invisible watermarking
+    └── media.py             # C2PA manifest signing, invisible watermarking & asset pipeline
 ```
 
 ---
