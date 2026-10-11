@@ -42,6 +42,8 @@ _media() {
                         '(-d --dir)'{-d,--dir}'[Base icons library directory]:icons directory:_files -/' \
                         '(-p --proofs-dir)'{-p,--proofs-dir}'[Separated proofs library directory]:proofs directory:_files -/' \
                         '--sizes[Comma-separated dist resolutions]:resolutions:' \
+                        '(--agent --ssh-agent)'{--agent,--ssh-agent}'[Sign via SSH Agent (Bitwarden Authorize prompt, 0 keys in RAM)]' \
+                        '--key-name[SSH key comment in agent (default: c2pa-signer)]:key comment:' \
                         '--bw[Fetch C2PA credentials from Bitwarden into RAM]::item name:' \
                         '--bw-item[Fetch C2PA credentials from Bitwarden item into RAM]:item name:' \
                         '--no-sign[Skip C2PA showcase signing]' \
@@ -86,6 +88,8 @@ _media() {
                         '--no-c2pa[Disable C2PA manifest signing]' \
                         '--stamp[Anchor in Bitcoin blockchain via OpenTimestamps]' \
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark permutation]:passphrase:' \
+                        '(--agent --ssh-agent)'{--agent,--ssh-agent}'[Sign via SSH Agent (Bitwarden Authorize prompt, 0 keys in RAM)]' \
+                        '--key-name[SSH key comment in agent (default: c2pa-signer)]:key comment:' \
                         '--key[Custom EC private key PEM file]:key file:_files' \
                         '--cert[Custom X.509 certificate chain PEM file]:cert file:_files' \
                         '--bw[Fetch credentials from Bitwarden into RAM]::item name:' \
@@ -125,7 +129,7 @@ _media() {
                         'gen:Generate or regenerate C2PA signing credentials'
                         'export:Export private key and cert in PEM format'
                         'push:Push local keys to Bitwarden vault as Secure Note'
-                        'use:Configure default Bitwarden item (or local for disk)'
+                        'use:Configure default signing source (agent, Bitwarden item, or local)'
                     )
                     _describe -t keys_cmds 'keys operation' keys_cmds
                     ;;

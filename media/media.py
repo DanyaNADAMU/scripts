@@ -27,11 +27,15 @@ import binascii
 import datetime
 import hashlib
 import io
+import base64
 import json
 import os
 import random
 import re
+import secrets
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import zlib
@@ -46,6 +50,7 @@ from scipy.fftpack import dct, idct
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import c2pa
@@ -155,6 +160,9 @@ def get_default_secret() -> str:
     salt = os.environ.get("C2PA_WATERMARK_SECRET")
     if salt:
         return salt
+    cfg = load_config()
+    if cfg.get("watermark_secret"):
+        return str(cfg["watermark_secret"])
     ident = f"{os.uname().nodename}-{os.getlogin() if hasattr(os, 'getlogin') else 'user'}-NADAMU"
     return hashlib.sha256(ident.encode("utf-8")).hexdigest()
 
@@ -461,6 +469,393 @@ def generate_c2pa_credentials(
         cert_out.write_bytes(chain_pem)
 
     return leaf_key_pem, chain_pem, root_key_pem
+
+
+def generate_c2pa_certs_for_public_key(
+    pub_key: Any,
+    domain: str = DEFAULT_DOMAIN,
+) -> tuple[bytes, bytes, bytes]:
+    """Generates a Root CA and issues a Leaf End-Entity certificate for an existing public key (e.g. from SSH agent)."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    # 1. Root Certificate Authority (CA)
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root_name = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, f"{domain} Media Root CA"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, domain),
+    ])
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(root_name)
+        .issuer_name(root_name)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+
+    # 2. Leaf Certificate (C2PA End Entity) for pub_key
+    leaf_name = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, f"{domain} Media Signer"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, domain),
+    ])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_name)
+        .issuer_name(root_name)
+        .public_key(pub_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1095))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=True,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.EMAIL_PROTECTION]),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(pub_key),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(domain)]),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+
+    root_key_pem = root_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    chain_pem = leaf_cert.public_bytes(serialization.Encoding.PEM) + root_cert.public_bytes(serialization.Encoding.PEM)
+    return chain_pem, root_key_pem, root_cert.public_bytes(serialization.Encoding.PEM)
+
+
+def find_ssh_agent_socket() -> Path | None:
+    """Discovers standard SSH agent socket path."""
+    cfg = load_config()
+    cfg_sock = cfg.get("ssh_agent_sock")
+    if cfg_sock:
+        p = Path(cfg_sock).expanduser()
+        if p.exists():
+            return p
+
+    env_sock = os.environ.get("SSH_AUTH_SOCK")
+    if env_sock:
+        p = Path(env_sock).expanduser()
+        if p.exists():
+            return p
+
+    # Standard fallback locations (Bitwarden, OpenSSH, Flatpak, systemd)
+    standard_paths = [
+        Path.home() / ".bitwarden-ssh-agent.sock",
+        Path.home() / ".ssh" / "bitwarden-agent.sock",
+        Path.home() / ".var" / "app" / "com.bitwarden.desktop" / "data" / ".bitwarden-ssh-agent.sock",
+        Path.home() / ".snap" / "bitwarden" / "current" / ".bitwarden-ssh-agent.sock",
+    ]
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        standard_paths.extend([
+            Path(xdg_runtime) / "ssh-agent.socket",
+            Path(xdg_runtime) / "keyring" / "ssh",
+        ])
+
+    for cand in standard_paths:
+        if cand.exists():
+            return cand
+    return None
+
+
+def extract_public_key_from_blob(key_blob: bytes, key_type: str) -> Any:
+    """Parses an OpenSSH public key blob into a cryptography public key object."""
+    line = f"{key_type} {base64.b64encode(key_blob).decode('ascii')}".encode("ascii")
+    return serialization.load_ssh_public_key(line)
+
+
+def ssh_agent_communicate(sock_path: Path, msg_type: int, payload: bytes = b"") -> tuple[int, bytes]:
+    """Sends a request to an OpenSSH agent socket and receives the response."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(str(sock_path))
+        req = struct.pack(">IB", len(payload) + 1, msg_type) + payload
+        s.sendall(req)
+        resp_len_hdr = s.recv(4)
+        if len(resp_len_hdr) < 4:
+            raise RuntimeError("SSH agent closed connection unexpectedly.")
+        resp_len = struct.unpack(">I", resp_len_hdr)[0]
+        data = bytearray()
+        while len(data) < resp_len:
+            chunk = s.recv(min(4096, resp_len - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) < 1:
+            raise RuntimeError("Empty response from SSH agent.")
+        return data[0], bytes(data[1:])
+    finally:
+        s.close()
+
+
+def ssh_agent_list_keys(sock_path: Path) -> list[tuple[bytes, str, str]]:
+    """Returns list of (key_blob, key_type, comment) from SSH agent."""
+    resp_type, payload = ssh_agent_communicate(sock_path, 11)  # SSH2_AGENTC_REQUEST_IDENTITIES = 11
+    if resp_type != 12:  # SSH2_AGENTC_IDENTITIES_ANSWER = 12
+        return []
+    if len(payload) < 4:
+        return []
+    num_keys = struct.unpack(">I", payload[:4])[0]
+    keys = []
+    offset = 4
+    for _ in range(num_keys):
+        if offset + 4 > len(payload):
+            break
+        k_len = struct.unpack(">I", payload[offset : offset + 4])[0]
+        offset += 4
+        k_blob = payload[offset : offset + k_len]
+        offset += k_len
+
+        if offset + 4 > len(payload):
+            break
+        c_len = struct.unpack(">I", payload[offset : offset + 4])[0]
+        offset += 4
+        comment = payload[offset : offset + c_len].decode("utf-8", errors="ignore")
+        offset += c_len
+
+        type_len = struct.unpack(">I", k_blob[:4])[0] if len(k_blob) >= 4 else 0
+        k_type = k_blob[4 : 4 + type_len].decode("ascii", errors="ignore") if type_len > 0 else ""
+        keys.append((k_blob, k_type, comment))
+    return keys
+
+
+def ssh_agent_sign(sock_path: Path, key_blob: bytes, key_type: str, data: bytes) -> bytes:
+    """Signs data via SSH agent and returns DER-encoded signature (or raw for Ed25519)."""
+    # SSH2_AGENTC_SIGN_REQUEST = 13
+    payload = struct.pack(">I", len(key_blob)) + key_blob
+    payload += struct.pack(">I", len(data)) + data
+    payload += struct.pack(">I", 0)  # flags
+    resp_type, resp_payload = ssh_agent_communicate(sock_path, 13, payload)
+    if resp_type == 5:  # SSH_AGENT_FAILURE = 5
+        raise RuntimeError("SSH signature request was denied or cancelled by user.")
+    if resp_type != 14:  # SSH2_AGENTC_SIGN_RESPONSE = 14
+        raise RuntimeError(f"Unexpected SSH agent response type: {resp_type}")
+
+    if len(resp_payload) < 4:
+        raise RuntimeError("Invalid signature payload from SSH agent.")
+    sig_blob_len = struct.unpack(">I", resp_payload[:4])[0]
+    sig_blob = resp_payload[4 : 4 + sig_blob_len]
+
+    fmt_len = struct.unpack(">I", sig_blob[:4])[0]
+    fmt = sig_blob[4 : 4 + fmt_len].decode("ascii", errors="ignore")
+    sig_data_len = struct.unpack(">I", sig_blob[4 + fmt_len : 8 + fmt_len])[0]
+    sig_data = sig_blob[8 + fmt_len : 8 + fmt_len + sig_data_len]
+
+    if "ecdsa" in fmt:
+        r_len = struct.unpack(">I", sig_data[:4])[0]
+        r_bytes = sig_data[4 : 4 + r_len]
+        s_len = struct.unpack(">I", sig_data[4 + r_len : 8 + r_len])[0]
+        s_bytes = sig_data[8 + r_len : 8 + r_len + s_len]
+        r = int.from_bytes(r_bytes, "big")
+        s = int.from_bytes(s_bytes, "big")
+        return encode_dss_signature(r, s)
+    elif "ed25519" in fmt:
+        return sig_data
+    else:
+        return sig_data
+
+
+def create_c2pa_signer_from_ssh_agent(
+    sock_path: Path | None = None,
+    key_comment: str | None = None,
+    cert_chain_pem: bytes | None = None,
+) -> c2pa.Signer:
+    """Creates a c2pa.Signer instance that signs via SSH Agent (Bitwarden Authorize popup)."""
+    sock = sock_path or find_ssh_agent_socket()
+    if not sock:
+        log_err("SSH agent socket not found.")
+        log_info("Ensure Bitwarden Desktop is running with SSH agent enabled ($SSH_AUTH_SOCK).")
+        sys.exit(1)
+
+    keys = ssh_agent_list_keys(sock)
+    if not keys:
+        log_err(f"No SSH keys available in agent at {sock}.")
+        log_info("Ensure Bitwarden Desktop is unlocked and contains an SSH key.")
+        sys.exit(1)
+
+    target_blob = None
+    target_type = None
+    target_comment = None
+
+    cfg = load_config()
+    wanted = key_comment or cfg.get("ssh_key_name") or "c2pa-signer"
+    for k_blob, k_type, comm in keys:
+        if wanted.lower() in comm.lower():
+            target_blob, target_type, target_comment = k_blob, k_type, comm
+            break
+
+    if not target_blob:
+        for k_blob, k_type, comm in keys:
+            if "ecdsa" in k_type or "ed25519" in k_type:
+                target_blob, target_type, target_comment = k_blob, k_type, comm
+                break
+
+    if not target_blob:
+        log_err(f"Could not find an ECDSA or Ed25519 key in SSH agent at {sock}.")
+        sys.exit(1)
+
+    c_bytes = cert_chain_pem
+    if not c_bytes:
+        if DEFAULT_CERT_PATH.is_file():
+            c_bytes = DEFAULT_CERT_PATH.read_bytes()
+        elif cfg.get("c2pa_cert_pem"):
+            c_bytes = cfg["c2pa_cert_pem"].encode("utf-8")
+        else:
+            log_err(f"C2PA certificate chain not found for SSH key '{target_comment}'.")
+            log_info(f"Generate certificates for this SSH key: {C_BOLD}media keys gen --agent{C_RESET}")
+            sys.exit(1)
+
+    alg = c2pa.C2paSigningAlg.ES256 if "ecdsa" in target_type else c2pa.C2paSigningAlg.ED25519
+
+    def _callback(data: bytes) -> bytes:
+        log_info(f"Awaiting signature authorization from Bitwarden Desktop ('{target_comment}')...")
+        sig = ssh_agent_sign(sock, target_blob, target_type, data)
+        log_ok("Signature authorized via Bitwarden SSH Agent.")
+        return sig
+
+    return c2pa.Signer.from_callback(_callback, alg, c_bytes.decode("utf-8"))
+
+
+def keys_gen_ssh_agent(
+    domain: str = DEFAULT_DOMAIN,
+    key_name: str = "c2pa-signer",
+    sock_path: Path | None = None,
+) -> None:
+    """Binds C2PA certificates to an existing SSH Key (e.g. Bitwarden Desktop SSH Agent).
+
+    Zero private keys on disk or in memory.
+    """
+    log_head(f"Binding C2PA credentials to SSH Agent key: '{key_name}'...")
+    sock = sock_path or find_ssh_agent_socket()
+    if not sock:
+        log_err("SSH agent socket not found.")
+        log_info("Ensure Bitwarden Desktop is running with SSH agent enabled.")
+        log_info("Checked: $SSH_AUTH_SOCK and standard paths (~/.ssh/bitwarden-agent.sock, Flatpak, systemd).")
+        sys.exit(1)
+
+    log_info(f"Connected to SSH agent socket: {sock}")
+    keys = ssh_agent_list_keys(sock)
+    if not keys:
+        log_err(f"No SSH keys available in agent at {sock}.")
+        log_info("Ensure Bitwarden Desktop is unlocked and contains an SSH key.")
+        sys.exit(1)
+
+    target_blob = None
+    target_type = None
+    target_comment = None
+
+    for k_blob, k_type, comm in keys:
+        if key_name.lower() in comm.lower():
+            target_blob, target_type, target_comment = k_blob, k_type, comm
+            break
+
+    if not target_blob:
+        for k_blob, k_type, comm in keys:
+            if "ecdsa" in k_type:
+                target_blob, target_type, target_comment = k_blob, k_type, comm
+                break
+
+    if not target_blob:
+        available_names = [f"'{c}' ({t})" for _, t, c in keys]
+        log_err(f"Could not find an ECDSA SSH key matching '{key_name}' in SSH agent.")
+        log_info(f"Available keys in agent: {', '.join(available_names) if available_names else 'None'}")
+        log_info("Please create an SSH Key item (ECDSA P-256) named 'c2pa-signer' in Bitwarden Desktop.")
+        sys.exit(1)
+
+    log_ok(f"Found active SSH key: '{target_comment}' ({target_type})")
+
+    try:
+        pub_key = extract_public_key_from_blob(target_blob, target_type)
+    except Exception as e:
+        log_err(f"Failed to parse public key for '{target_comment}': {e}")
+        sys.exit(1)
+
+    log_info(f"Issuing X.509 C2PA certificates for {domain} (Root CA -> Leaf)...")
+    chain_pem, root_key_pem, root_cert_pem = generate_c2pa_certs_for_public_key(pub_key, domain)
+
+    # Generate dedicated watermark secret
+    wm_secret = secrets.token_hex(16)
+
+    # Save certificate chain to DEFAULT_CERT_PATH (public certificates only!)
+    DEFAULT_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CERT_PATH.write_bytes(chain_pem)
+    os.chmod(DEFAULT_CERT_PATH, 0o644)
+
+    # Update configuration
+    cfg = load_config()
+    cfg["signing_mode"] = "ssh-agent"
+    cfg["ssh_key_name"] = target_comment
+    cfg["ssh_agent_sock"] = str(sock)
+    cfg["watermark_secret"] = wm_secret
+    cfg["domain"] = domain
+    cfg.pop("bitwarden_item", None)
+    save_config(cfg)
+
+    log_ok(f"Public certificate chain saved: {DEFAULT_CERT_PATH}")
+    log_ok(f"Signing mode configured: 'ssh-agent' in {DEFAULT_CONFIG_FILE}")
+
+    print(f"\n  {C_BOLD}{C_GREEN}Zero-Knowledge SSH Agent Signing Active!{C_RESET}")
+    print(f"  • Private key storage:     {C_CYAN}Bitwarden Desktop Vault (Protected){C_RESET}")
+    print(f"  • Private key on disk:     {C_GREEN}0 bytes{C_RESET}")
+    print(f"  • Private key in RAM:      {C_GREEN}0 bytes (Agent callback protocol){C_RESET}")
+    print(f"  • Signature confirmation:  {C_CYAN}Bitwarden Desktop [Authorize] GUI prompt{C_RESET}")
+    print(f"  • Watermark secret:        {C_CYAN}{wm_secret}{C_RESET} (saved in {DEFAULT_CONFIG_FILE})\n")
+
+    print(f"  {C_BOLD}Bitwarden Vault Recommendation:{C_RESET}")
+    print(f"  Open Bitwarden Desktop -> edit SSH Key entry '{target_comment}':")
+    print(f"    1. Add custom text field:   {C_BOLD}cert{C_RESET}             (Paste contents of {DEFAULT_CERT_PATH})")
+    print(f"    2. Add custom hidden field: {C_BOLD}watermark_secret{C_RESET} ({wm_secret})")
+    print(f"    3. Add custom hidden field: {C_BOLD}root_key{C_RESET}         (Root CA disaster recovery backup below)")
+    print(f"\n{C_YELLOW}--- BEGIN ROOT CA PRIVATE KEY BACKUP ---{C_RESET}")
+    print(root_key_pem.decode("utf-8").strip())
+    print(f"{C_YELLOW}--- END ROOT CA PRIVATE KEY BACKUP ---{C_RESET}\n")
 
 
 def parse_pem_bundle(text: str) -> tuple[bytes | None, bytes | None]:
@@ -952,6 +1347,8 @@ def process_signing(
     key_path: Path | None = None,
     cert_path: Path | None = None,
     bw_item: str | None = None,
+    use_agent: bool = False,
+    agent_key_name: str | None = None,
 ) -> None:
     """Executes multi-layer signing (DWT-DCT steganography + C2PA Credentials + OpenTimestamps)."""
     if not input_path.is_file():
@@ -978,18 +1375,36 @@ def process_signing(
     log_info(f"Domain:      {act_domain}")
     log_info(f"Target:      {output_path}")
 
-    # Load credentials in advance (strictly in RAM if using Bitwarden or env vars)
+    # Determine signing mode: SSH agent callback or in-memory / local key
+    is_agent_mode = use_agent or (cfg.get("signing_mode") == "ssh-agent" and not bw_item and not key_path)
+    signer: c2pa.Signer | None = None
     key_bytes: bytes | None = None
     cert_bytes: bytes | None = None
-    if not no_c2pa:
-        key_bytes, cert_bytes = load_or_create_credentials(
-            key_path=key_path,
-            cert_path=cert_path,
-            domain=act_domain,
-            bw_item=bw_item,
-        )
 
-    # Derive watermark permutation secret from key bytes if not explicitly provided
+    if not no_c2pa:
+        if is_agent_mode:
+            k_target = agent_key_name or cfg.get("ssh_key_name") or "c2pa-signer"
+            c_target = cert_path.read_bytes() if cert_path and cert_path.is_file() else None
+            signer = create_c2pa_signer_from_ssh_agent(
+                key_comment=k_target,
+                cert_chain_pem=c_target,
+            )
+        else:
+            key_bytes, cert_bytes = load_or_create_credentials(
+                key_path=key_path,
+                cert_path=cert_path,
+                domain=act_domain,
+                bw_item=bw_item,
+            )
+            signer_info = c2pa.C2paSignerInfo(
+                alg=c2pa.C2paSigningAlg.ES256,
+                sign_cert=cert_bytes,
+                private_key=key_bytes,
+                ta_url=None,
+            )
+            signer = c2pa.Signer.from_info(signer_info)
+
+    # Derive watermark permutation secret from key bytes or configuration
     wm_secret = secret
     if not wm_secret:
         if key_bytes:
@@ -1022,16 +1437,8 @@ def process_signing(
             shutil.copyfile(input_path, output_path)
 
     # Stage 2: C2PA Content Credentials
-    if not no_c2pa and key_bytes and cert_bytes:
+    if not no_c2pa and signer:
         log_info("Stage 2: Signing with C2PA Content Credentials...")
-
-        signer_info = c2pa.C2paSignerInfo(
-            alg=c2pa.C2paSigningAlg.ES256,
-            sign_cert=cert_bytes,
-            private_key=key_bytes,
-            ta_url=None,
-        )
-        signer = c2pa.Signer.from_info(signer_info)
 
         action_params: dict[str, Any] = {
             "description": desc_text,
@@ -1457,6 +1864,8 @@ def execute_build(
     proofs_dir: Path | None = None,
     sizes: list[int] | None = None,
     bw_item: str | None = None,
+    use_agent: bool = False,
+    agent_key_name: str | None = None,
     no_sign: bool = False,
     no_stamp: bool = False,
     force: bool = False,
@@ -1615,6 +2024,8 @@ def execute_build(
             output_path=signed_target,
             stamp=(not no_stamp),
             bw_item=bw_item,
+            use_agent=use_agent,
+            agent_key_name=agent_key_name,
         )
         showcase_tmp.unlink(missing_ok=True)
         local_showcase_ots = signed_target.with_name(f"{signed_target.name}.ots")
@@ -1705,40 +2116,82 @@ def keys_show(bw_item: str | None = None) -> None:
     """Displays active signing credentials information."""
     log_head("C2PA Signing Credentials Status")
     cfg = load_config()
+    mode = cfg.get("signing_mode")
     target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
 
-    if target_bw:
-        print(f"  {C_BOLD}Source:{C_RESET}      Bitwarden Vault (In-Memory)")
-        print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
-        print(f"  {C_BOLD}Item:{C_RESET}        {target_bw}")
+    if bw_item:
+        mode = "bitwarden"
+    elif not mode:
+        mode = "bitwarden" if target_bw else "local"
+
+    if mode == "ssh-agent":
+        key_name = cfg.get("ssh_key_name", "c2pa-signer")
+        sock = find_ssh_agent_socket()
+        print(f"  {C_BOLD}Signing Mode:{C_RESET}     SSH Agent (Zero-Knowledge / RAM-Safe)")
+        print(f"  {C_BOLD}Security Enclave:{C_RESET} Bitwarden Desktop (GUI Prompt [Authorize])")
+        print(f"  {C_BOLD}Config File:{C_RESET}      {DEFAULT_CONFIG_FILE}")
+        print(f"  {C_BOLD}Agent Socket:{C_RESET}     {sock if sock else C_RED + 'Not found' + C_RESET}")
+        print(f"  {C_BOLD}SSH Key Name:{C_RESET}     {key_name}")
+
+        if sock and sock.exists():
+            try:
+                keys = ssh_agent_list_keys(sock)
+                matched = [comm for _, _, comm in keys if key_name.lower() in (comm or "").lower()]
+                if matched:
+                    print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_GREEN}Active (Key '{matched[0]}' loaded){C_RESET}")
+                else:
+                    print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_YELLOW}Connected, but key '{key_name}' not listed{C_RESET}")
+            except Exception as e:
+                print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_RED}Communication error: {e}{C_RESET}")
+        else:
+            print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_RED}Agent socket unreachable{C_RESET}")
+
+        print(f"  {C_BOLD}Cert File:{C_RESET}        {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
+        wm_sec = cfg.get("watermark_secret")
+        print(f"  {C_BOLD}Watermark Key:{C_RESET}    {'Configured in c2pa.json' if wm_sec else 'Default fallback'}")
+        print(f"  {C_BOLD}Private Key RAM:{C_RESET}  {C_GREEN}0 bytes (Never leaves Bitwarden process){C_RESET}")
+        print(f"  {C_BOLD}Private Key Disk:{C_RESET} {C_GREEN}0 bytes (Never written to filesystem){C_RESET}\n")
+        return
+
+    if mode == "bitwarden" and target_bw:
+        print(f"  {C_BOLD}Source:{C_RESET}           Bitwarden Vault (In-Memory CLI)")
+        print(f"  {C_BOLD}Config File:{C_RESET}       {DEFAULT_CONFIG_FILE}")
+        print(f"  {C_BOLD}Item:{C_RESET}              {target_bw}")
         try:
             k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
-            print(f"  {C_BOLD}Key Status:{C_RESET}  {C_GREEN}Available in RAM ({len(k_bytes)} bytes){C_RESET}")
-            print(f"  {C_BOLD}Cert Status:{C_RESET} {C_GREEN}Available in RAM ({len(c_bytes)} bytes){C_RESET}")
+            print(f"  {C_BOLD}Key Status:{C_RESET}       {C_GREEN}Available in RAM ({len(k_bytes)} bytes){C_RESET}")
+            print(f"  {C_BOLD}Cert Status:{C_RESET}      {C_GREEN}Available in RAM ({len(c_bytes)} bytes){C_RESET}")
         except Exception as e:
-            print(f"  {C_BOLD}Status:{C_RESET}      {C_RED}Failed to load: {e}{C_RESET}")
+            print(f"  {C_BOLD}Status:{C_RESET}           {C_RED}Failed to load: {e}{C_RESET}")
         print()
         return
 
     env_creds = load_env_credentials()
     if env_creds:
-        print(f"  {C_BOLD}Source:{C_RESET}      Environment Variables (C2PA_PRIVATE_KEY, C2PA_CERT)")
-        print(f"  {C_BOLD}Status:{C_RESET}      {C_GREEN}Active in environment{C_RESET}\n")
+        print(f"  {C_BOLD}Source:{C_RESET}           Environment Variables (C2PA_PRIVATE_KEY, C2PA_CERT)")
+        print(f"  {C_BOLD}Status:{C_RESET}           {C_GREEN}Active in environment{C_RESET}\n")
         return
 
-    print(f"  {C_BOLD}Source:{C_RESET}      Local Disk Storage")
-    print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
-    print(f"  {C_BOLD}Key File:{C_RESET}    {DEFAULT_KEY_PATH} ({'Found' if DEFAULT_KEY_PATH.is_file() else 'Missing'})")
-    print(f"  {C_BOLD}Cert File:{C_RESET}   {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
-    print(f"\n  {C_CYAN}To migrate to Bitwarden:{C_RESET}")
-    print(f"    1. export BW_SESSION=$(bw unlock --raw)")
-    print(f"    2. media keys push c2pa-signer")
+    print(f"  {C_BOLD}Source:{C_RESET}           Local Disk Storage")
+    print(f"  {C_BOLD}Config File:{C_RESET}       {DEFAULT_CONFIG_FILE}")
+    print(f"  {C_BOLD}Key File:{C_RESET}         {DEFAULT_KEY_PATH} ({'Found' if DEFAULT_KEY_PATH.is_file() else 'Missing'})")
+    print(f"  {C_BOLD}Cert File:{C_RESET}        {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
+    print(f"\n  {C_CYAN}To use Bitwarden SSH Agent (Zero keys in RAM / disk):{C_RESET}")
+    print(f"    1. Create SSH Key item 'c2pa-signer' (ECDSA P-256) in Bitwarden")
+    print(f"    2. media keys gen --agent")
     print(f"    3. rm -rf {DEFAULT_KEY_DIR}\n")
 
 
 def keys_export(bw_item: str | None = None) -> None:
     """Exports raw PEM key and certificate to stdout for backup or Bitwarden."""
     cfg = load_config()
+    mode = cfg.get("signing_mode")
+    if mode == "ssh-agent" and not bw_item:
+        print(f"  {C_YELLOW}Note: Private key is stored securely in Bitwarden Desktop and cannot be exported.{C_RESET}\n")
+        if DEFAULT_CERT_PATH.is_file():
+            print(DEFAULT_CERT_PATH.read_bytes().decode("utf-8").strip())
+        return
+
     target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
     if target_bw:
         k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
@@ -1753,13 +2206,24 @@ def keys_export(bw_item: str | None = None) -> None:
     print(c_bytes.decode("utf-8").strip())
 
 
-def keys_gen(domain: str = DEFAULT_DOMAIN, bw_item: str | None = None, out_dir: Path | None = None) -> None:
+def keys_gen(
+    domain: str = DEFAULT_DOMAIN,
+    bw_item: str | None = None,
+    out_dir: Path | None = None,
+    use_agent: bool = False,
+    key_name: str = "c2pa-signer",
+) -> None:
     """Generates new Root CA + Leaf C2PA credentials."""
+    if use_agent:
+        keys_gen_ssh_agent(domain=domain, key_name=key_name)
+        return
+
     if bw_item:
         log_head(f"Generating C2PA credentials directly in Bitwarden vault: '{bw_item}'...")
         k_bytes, c_bytes, r_bytes = generate_c2pa_credentials(domain)
         save_credentials_to_bitwarden(bw_item, k_bytes, c_bytes, domain, root_key_pem=r_bytes)
         cfg = load_config()
+        cfg["signing_mode"] = "bitwarden"
         cfg["bitwarden_item"] = bw_item
         save_config(cfg)
         log_ok(f"Configured Bitwarden item '{bw_item}' as default signing source in {DEFAULT_CONFIG_FILE}.")
@@ -1770,6 +2234,9 @@ def keys_gen(domain: str = DEFAULT_DOMAIN, bw_item: str | None = None, out_dir: 
         out_cert = target_dir / "es256_certs.pem"
         log_head(f"Generating C2PA signing credentials for {domain}...")
         generate_c2pa_credentials(domain, out_key, out_cert)
+        cfg = load_config()
+        cfg["signing_mode"] = "local"
+        save_config(cfg)
         log_ok(f"Key written:  {out_key}")
         log_ok(f"Cert written: {out_cert}")
 
@@ -1783,6 +2250,7 @@ def keys_push(item_name: str) -> None:
     c_bytes = DEFAULT_CERT_PATH.read_bytes()
     save_credentials_to_bitwarden(item_name, k_bytes, c_bytes, DEFAULT_DOMAIN)
     cfg = load_config()
+    cfg["signing_mode"] = "bitwarden"
     cfg["bitwarden_item"] = item_name
     save_config(cfg)
     log_ok(f"Configured Bitwarden item '{item_name}' as default signing source in {DEFAULT_CONFIG_FILE}.")
@@ -1792,16 +2260,35 @@ def keys_push(item_name: str) -> None:
 
 
 def keys_use(item_name: str | None = None) -> None:
-    """Configures default Bitwarden vault item or reverts to local disk storage."""
+    """Configures default signing source: 'agent' / 'ssh-agent', Bitwarden item name, or 'local'."""
     cfg = load_config()
     if not item_name or item_name.lower() in ("local", "disk", "none"):
+        cfg["signing_mode"] = "local"
         cfg["bitwarden_item"] = None
         save_config(cfg)
         log_ok(f"Reverted signing credentials source to local disk in {DEFAULT_CONFIG_FILE}.")
         return
 
+    if item_name.lower() in ("agent", "ssh-agent"):
+        sock = find_ssh_agent_socket()
+        if not sock:
+            log_err("SSH agent socket not found.")
+            log_info("Ensure Bitwarden Desktop is running with SSH agent enabled ($SSH_AUTH_SOCK).")
+            sys.exit(1)
+        keys = ssh_agent_list_keys(sock)
+        if not keys:
+            log_err(f"No SSH keys available in agent at {sock}.")
+            sys.exit(1)
+        cfg["signing_mode"] = "ssh-agent"
+        cfg["bitwarden_item"] = None
+        save_config(cfg)
+        key_name = cfg.get("ssh_key_name", "c2pa-signer")
+        log_ok(f"Configured SSH Agent ('{key_name}') as default signing source in {DEFAULT_CONFIG_FILE}.")
+        return
+
     # Verify we can fetch the item
     fetch_bitwarden_credentials(item_name)
+    cfg["signing_mode"] = "bitwarden"
     cfg["bitwarden_item"] = item_name
     save_config(cfg)
     log_ok(f"Configured Bitwarden item '{item_name}' as default signing source in {DEFAULT_CONFIG_FILE}.")
@@ -1820,7 +2307,8 @@ Asset Pipeline Examples:
   media init duck v1                             # Scaffold directory hierarchy
   media build duck v1                            # Auto-detect source files and build
   media build duck v1 -m master.png -r canvas.xcf # Build with explicit source paths
-  media build duck v2 --bw                       # Build using Bitwarden signing keys
+  media build duck v2 --agent                    # Build & sign via Bitwarden SSH Agent ([Authorize] prompt)
+  media build duck v2 --bw                       # Build using Bitwarden in-memory CLI keys
   media audit duck v1                            # Verify asset integrity against Bitcoin
   media audit                                    # Full integrity audit of entire library
   media list                                     # List managed assets and active versions
@@ -1828,6 +2316,7 @@ Asset Pipeline Examples:
 
 File Attestation Examples:
   media sign photo.png                           # Sign with C2PA and invisible watermark
+  media sign --agent photo.png                   # Sign via Bitwarden SSH Agent
   media sign --bw --stamp hero.png               # Sign from Bitwarden & anchor in Bitcoin
   media verify photo_signed.png                  # Inspect all 3 security layers
   media stamp document.pdf                       # Anchor arbitrary file in Bitcoin
@@ -1835,8 +2324,9 @@ File Attestation Examples:
 Automation & Keys Examples:
   media timer setup /path/to/Icons-Proofs        # Start background OTS upgrade timer
   media timer status                             # Inspect timer state
-  media keys show                                # Inspect active C2PA certificate
-  media keys gen --bw c2pa-signer                # Generate keys directly into Bitwarden
+  media keys show                                # Inspect active C2PA certificate & agent status
+  media keys gen --agent                         # Bind C2PA certs to Bitwarden SSH Agent (0 keys in RAM/disk)
+  media keys use agent                           # Set SSH Agent as default signing source
         """,
     )
 
@@ -1858,6 +2348,8 @@ Automation & Keys Examples:
     p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
     p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
     p_build.add_argument("--sizes", type=str, default="512,256,128,64,32", help="Comma-separated dist resolutions")
+    p_build.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
+    p_build.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Bitwarden item name for C2PA keys")
     p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA signing of showcase release")
     p_build.add_argument("--no-stamp", action="store_true", help="Skip OpenTimestamps Bitcoin anchoring")
@@ -1897,6 +2389,8 @@ Automation & Keys Examples:
     p_sign.add_argument("--no-c2pa", action="store_true", help="Disable C2PA manifest signing")
     p_sign.add_argument("--stamp", action="store_true", help="Anchor signed file in Bitcoin blockchain via OpenTimestamps")
     p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
+    p_sign.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
+    p_sign.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
     p_sign.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch C2PA credentials strictly from Bitwarden into RAM")
@@ -1932,13 +2426,15 @@ Automation & Keys Examples:
     p_k_gen = sub_keys.add_parser("gen", help="Generate or regenerate C2PA signing credentials")
     p_k_gen.add_argument("-d", "--domain", type=str, default=DEFAULT_DOMAIN, help="Domain for certificates")
     p_k_gen.add_argument("--out-dir", type=Path, default=DEFAULT_KEY_DIR, help="Destination directory for keys")
+    p_k_gen.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Bind C2PA certificates to SSH Agent key (Bitwarden, zero keys on disk/RAM)")
+    p_k_gen.add_argument("--key-name", type=str, default="c2pa-signer", help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_k_gen.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Store credentials directly in Bitwarden vault (0 disk files)")
     p_k_exp = sub_keys.add_parser("export", help="Export private key and cert in PEM format")
     p_k_exp.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Export from Bitwarden vault")
     p_k_push = sub_keys.add_parser("push", help="Push local keys to Bitwarden vault as Secure Note")
     p_k_push.add_argument("item", type=str, default=DEFAULT_BW_ITEM, nargs="?", help="Bitwarden item name")
-    p_k_use = sub_keys.add_parser("use", help="Configure default Bitwarden item (or 'local' for disk)")
-    p_k_use.add_argument("item", type=str, nargs="?", default=DEFAULT_BW_ITEM, help="Bitwarden item name (or 'local')")
+    p_k_use = sub_keys.add_parser("use", help="Configure default signing source ('agent', Bitwarden item, or 'local')")
+    p_k_use.add_argument("item", type=str, nargs="?", default="agent", help="Signing source ('agent', Bitwarden item name, or 'local')")
 
     # Shortcut handling: if first arg is an existing file, default to 'verify'
     args_list = sys.argv[1:]
@@ -1981,6 +2477,8 @@ Automation & Keys Examples:
             proofs_dir=proofs_base,
             sizes=parsed_sizes,
             bw_item=args.bw_item,
+            use_agent=getattr(args, "agent", False),
+            agent_key_name=getattr(args, "key_name", None),
             no_sign=args.no_sign,
             no_stamp=args.no_stamp,
             force=args.force,
@@ -2064,6 +2562,8 @@ Automation & Keys Examples:
             key_path=args.key,
             cert_path=args.cert,
             bw_item=args.bw_item,
+            use_agent=getattr(args, "agent", False),
+            agent_key_name=getattr(args, "key_name", None),
         )
 
     # Dispatch: verify
@@ -2096,7 +2596,13 @@ Automation & Keys Examples:
         if action == "show" or action is None:
             keys_show(bw_item=getattr(args, "bw_item", None))
         elif action == "gen":
-            keys_gen(domain=args.domain, bw_item=args.bw_item, out_dir=args.out_dir)
+            keys_gen(
+                domain=args.domain,
+                bw_item=args.bw_item,
+                out_dir=args.out_dir,
+                use_agent=getattr(args, "agent", False),
+                key_name=getattr(args, "key_name", "c2pa-signer"),
+            )
         elif action == "export":
             keys_export(bw_item=args.bw_item)
         elif action == "push":

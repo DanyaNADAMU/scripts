@@ -45,7 +45,7 @@ _media_completions() {
             return 0
             ;;
         build)
-            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --bw --bw-item --no-sign --no-stamp --force -h --help"
+            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --agent --ssh-agent --key-name --bw --bw-item --no-sign --no-stamp --force -h --help"
             if [ -d "$icons_dir" ]; then
                 local assets
                 assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
@@ -83,7 +83,7 @@ _media_completions() {
             return 0
             ;;
         sign)
-            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description -l --license -w --watermark --no-watermark --no-c2pa --stamp -s --secret --key --cert --bw --bw-item -h --help"
+            local opts="-o --output --in-place -t --title -a --author -d --domain -m --description -l --license -w --watermark --no-watermark --no-c2pa --stamp -s --secret --agent --ssh-agent --key-name --key --cert --bw --bw-item -h --help"
             COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -W "$opts" -- "$cur") )
             return 0
             ;;
@@ -104,7 +104,21 @@ _media_completions() {
             ;;
         keys)
             local subcmds="show gen export push use -h --help"
-            COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            else
+                case "${COMP_WORDS[2]}" in
+                    gen)
+                        COMPREPLY=( $(compgen -W "-d --domain --agent --ssh-agent --key-name --bw --bw-item --out-dir -h --help" -- "$cur") )
+                        ;;
+                    use)
+                        COMPREPLY=( $(compgen -W "agent ssh-agent local c2pa-signer" -- "$cur") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+                        ;;
+                esac
+            fi
             return 0
             ;;
     esac

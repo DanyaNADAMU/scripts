@@ -21,6 +21,8 @@ media \- unified media lifecycle: C2PA attestation, invisible watermarking, Bitc
 .RB [ \-d " dir" ]
 .RB [ \-p " proofs-dir" ]
 .RB [ \-\-sizes " sizes" ]
+.RB [ \-\-agent ]
+.RB [ \-\-key\-name " name" ]
 .RB [ \-\-bw " [" \fIitem\fR ]]
 .RB [ \-\-no\-sign ]
 .RB [ \-\-no\-stamp ]
@@ -49,6 +51,8 @@ media \- unified media lifecycle: C2PA attestation, invisible watermarking, Bitc
 .RB [ \-o " output" ]
 .RB [ \-\-in\-place ]
 .RB [ \-\-stamp ]
+.RB [ \-\-agent ]
+.RB [ \-\-key\-name " name" ]
 .RB [ \-\-bw " [" \fIitem\fR ]]
 .RB [ \-t " title" ]
 .RB [ \-a " author" ]
@@ -74,7 +78,7 @@ media \- unified media lifecycle: C2PA attestation, invisible watermarking, Bitc
 .RB { setup " [" \fIdir\fR "] [" \-\-interval " \fIinterval\fR ]" | status | remove }
 .br
 .B media keys
-.RB { show | gen " [" \-d " \fIdomain\fR ] [" \-\-bw " \fIitem\fR ]" | export | push " [" \fIitem\fR ] }
+.RB { show | gen " [" \-d " \fIdomain\fR ] [" \-\-agent ] [" \-\-bw " \fIitem\fR ]" | export | push " [" \fIitem\fR ] | use " [" agent | \fIitem\fR | local ] }
 .SH DESCRIPTION
 \fBmedia\fR provides an end-to-end media attestation, provenance verification, asset packaging, and blockchain anchoring suite for the nada.mu ecosystem.
 It integrates three independent cryptographic layers into a unified workflow:
@@ -126,19 +130,19 @@ Disables and removes the background systemd timer and service units.
 .SS Keys & Vault
 .TP
 .B keys show
-Displays the active C2PA certificate information, issuer, validity period, and credential storage location (Bitwarden or local disk).
+Displays active C2PA certificate information, issuer, validity period, SSH agent connection status, and credential storage location (SSH Agent, Bitwarden CLI, or local disk).
 .TP
-.B keys gen [\-d \fIdomain\fR] [\-\-bw \fIitem\fR]
-Generates a new ECDSA P-256 Root CA and Leaf End-Entity signing certificate chain. Can write to disk or directly into Bitwarden vault.
+.B keys gen [\-d \fIdomain\fR] [\-\-agent] [\-\-key\-name \fIname\fR] [\-\-bw \fIitem\fR]
+Generates or binds C2PA signing credentials. With \fB\-\-agent\fR, queries the active OpenSSH agent (e.g. Bitwarden Desktop), extracts the public key from the ECDSA P-256 SSH key \fIname\fR (default: \fBc2pa-signer\fR), issues matching Root CA and Leaf X.509 certificates, and configures zero-knowledge signing (0 private key bytes written to disk or RAM).
 .TP
 .B keys export
-Prints raw PEM blocks of the private key and certificate chain to standard output for secure backups.
+Prints raw PEM blocks of the certificate chain (and private key if stored locally) to standard output.
 .TP
 .B keys push [\fIitem\fR]
 Uploads local signing keys directly into Bitwarden vault as a Secure Note and sets it as the default vault item.
 .TP
-.B keys use [\fIitem\fR]
-Configures the default Bitwarden vault item to load signing credentials from (pass \fIlocal\fR to revert to disk).
+.B keys use [\fIagent\fR | \fIitem\fR | \fIlocal\fR]
+Configures the default signing source. Pass \fBagent\fR or \fBssh\-agent\fR to use Bitwarden Desktop SSH Agent with interactive GUI prompts, an item name for Bitwarden CLI, or \fBlocal\fR to revert to disk.
 .SH OPTIONS
 .TP
 .BI \-m ", " \-\-master " file"
@@ -156,8 +160,14 @@ Base directory for the separated OpenTimestamps proofs archive (default: sibling
 .BI \-\-sizes " list"
 Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).
 .TP
+.BI \-\-agent ", " \-\-ssh\-agent
+Signs via OpenSSH Agent callback (Bitwarden Desktop \fB[Authorize]\fR GUI prompt). The raw private key never leaves the Bitwarden process (0 bytes in Python memory, 0 bytes on disk).
+.TP
+.BI \-\-key\-name " name"
+Specifies the SSH key comment/identifier in the agent (default: \fBc2pa-signer\fR).
+.TP
 .BI \-\-bw ", " \-\-bw\-item " item"
-Retrieves C2PA signing private key and certificate chain directly from Bitwarden into RAM (0 disk writes). Default item: \fBc2pa-signer\fR.
+Retrieves C2PA signing private key and certificate chain directly from Bitwarden via CLI into RAM. Default item: \fBc2pa-signer\fR.
 .TP
 .BI \-\-no\-sign
 Bypasses C2PA manifest signing and steganographic watermarking.
@@ -171,6 +181,9 @@ Forces re-building and re-stamping even if pre-flight audit reports mismatches.
 .BI \-\-json
 Outputs raw structured inspection data in JSON format for scripting.
 .SH ENVIRONMENT
+.TP
+.B SSH_AUTH_SOCK
+Unix domain socket for OpenSSH agent communication (e.g. \fI~/.ssh/bitwarden-agent.sock\fR).
 .TP
 .B SEAFILE_ICONS
 Overrides default base directory for icons library.
