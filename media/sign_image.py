@@ -867,8 +867,17 @@ def setup_ots_timer(target_dir: Path | None, interval: str = "2h") -> None:
 
     chosen_dir: Path
     if target_dir is None or str(target_dir) in ("DEFAULT", "None"):
-        cand = Path.home() / "SeaDrive" / "My Libraries" / "Icons"
-        chosen_dir = cand if cand.is_dir() else (Path.home() / ".config" / "nadamu")
+        for cand in [
+            Path.home() / "Seafile" / "Icons-Proofs",
+            Path.home() / "Seafile" / "Icons",
+            Path.home() / "SeaDrive" / "My Libraries" / "Icons-Proofs",
+            Path.home() / "SeaDrive" / "My Libraries" / "Icons",
+        ]:
+            if cand.is_dir():
+                chosen_dir = cand
+                break
+        else:
+            chosen_dir = Path.home() / ".config" / "nadamu"
     else:
         chosen_dir = target_dir
 

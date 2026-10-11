@@ -2,11 +2,17 @@
 .SH NAME
 build-image \- structured media asset pipeline with audit, C2PA signing, and multi-scale dist rendering
 .SH SYNOPSIS
+.B build-image init
+.I name
+.I version
+.RB [ \-d " dir" ]
+.RB [ \-p " proofs-dir" ]
+.br
 .B build-image
 .RB [ build ]
 .I name
 .I version
-.BI \-m " master"
+.RB [ \-m " master" ]
 .RB [ \-r " raw" ]
 .RB [ \-d " dir" ]
 .RB [ \-p " proofs-dir" ]
@@ -52,8 +58,11 @@ Derivatives do not carry individual \fI.ots\fR proofs because their provenance i
 Each asset directory contains an atomic symlink \fBlatest\fR pointing to the currently active version tag.
 .SH COMMANDS
 .TP
+.B init
+Initializes the standardized directory hierarchy (\fB01_source/raw/\fR, \fB01_source/master/\fR, \fB02_signed/\fR, \fB03_dist/\fR, and the corresponding proofs directory) for a new asset version tag without building files.
+.TP
 .B build
-Constructs a complete versioned release from source materials. Performs pre-flight integrity auditing, locks source files (\fB0444\fR), anchors sources with OpenTimestamps, produces the signed 1024px showcase, generates downscaled distribution formats, and updates the \fBlatest\fR symlink.
+Constructs a complete versioned release from source materials. Automatically discovers existing master and raw files if already placed in \fB01_source/\fR, or scaffolds the structure if empty. Performs pre-flight integrity auditing, locks source files (\fB0444\fR), anchors sources with OpenTimestamps, produces the signed 1024px showcase, generates downscaled distribution formats, and updates the \fBlatest\fR symlink.
 .TP
 .B audit
 Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
@@ -68,16 +77,16 @@ Scans the managed icons library and lists all assets, available versions, and cu
 .SH OPTIONS
 .TP
 .BI \-m ", " \-\-master " file"
-Path to normalized/cropped square master image (PNG, WebP, etc.). Required for \fBbuild\fR.
+Path to normalized/cropped square master image (PNG, WebP, etc.). Optional; if omitted, \fBbuild-image\fR automatically detects any existing master image in \fB01_source/master/\fR.
 .TP
 .BI \-r ", " \-\-raw " file"
-Path to original uncropped project canvas or raw work file (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR).
+Path to original uncropped project canvas or raw work file (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR). Optional; automatically detected if present in \fB01_source/raw/\fR.
 .TP
 .BI \-d ", " \-\-dir " path"
-Base directory for the managed icons library (default: \fB$SEADRIVE_ICONS\fR or \fI~/SeaDrive/My Libraries/Icons\fR).
+Base directory for the managed icons library (default: current directory if named \fIIcons\fR, \fB$SEAFILE_ICONS\fR, \fI~/Seafile/Icons\fR, \fB$SEADRIVE_ICONS\fR, or \fI~/SeaDrive/My Libraries/Icons\fR).
 .TP
 .BI \-p ", " \-\-proofs\-dir " path"
-Base directory for the separated OpenTimestamps proofs library (default: \fB$SEADRIVE_PROOFS\fR or \fI~/SeaDrive/My Libraries/Icons\-Proofs\fR). When set, all \fI.ots\fR files are segregated into this archive, keeping media libraries free of blockchain artifacts and allowing zero-media proof synchronization on remote servers.
+Base directory for the separated OpenTimestamps proofs library (default: sibling \fI<icons>-Proofs\fR, \fB$SEAFILE_PROOFS\fR, \fI~/Seafile/Icons\-Proofs\fR, \fB$SEADRIVE_PROOFS\fR, or \fI~/SeaDrive/My Libraries/Icons\-Proofs\fR). When set, all \fI.ots\fR files are segregated into this archive, keeping media libraries free of blockchain artifacts and allowing zero-media proof synchronization on remote servers.
 .TP
 .BI \-\-sizes " list"
 Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).

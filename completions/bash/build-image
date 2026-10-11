@@ -3,10 +3,15 @@ _build_image_completions() {
     local cur prev commands cmd icons_dir
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="build audit upgrade list -h --help"
+    commands="build init audit upgrade list -h --help"
 
-    icons_dir="${SEADRIVE_ICONS:-$HOME/SeaDrive/My Libraries/Icons}"
-    [ ! -d "$icons_dir" ] && icons_dir="$HOME/.local/share/icons-archive"
+    for cand in "${SEAFILE_ICONS}" "$HOME/Seafile/Icons" "${SEADRIVE_ICONS}" "$HOME/SeaDrive/My Libraries/Icons"; do
+        if [ -n "$cand" ] && [ -d "$cand" ]; then
+            icons_dir="$cand"
+            break
+        fi
+    done
+    [ -z "$icons_dir" ] && icons_dir="$HOME/.local/share/icons-archive"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -30,6 +35,11 @@ _build_image_completions() {
     esac
 
     case "$cmd" in
+        init)
+            local opts="-d --dir -p --proofs-dir -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
         build)
             local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --bw --bw-item --no-sign --no-stamp --force-re-stamp -h --help"
             COMPREPLY=( $(compgen -W "$opts" -- "$cur") )

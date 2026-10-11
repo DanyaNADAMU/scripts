@@ -74,26 +74,62 @@ def log_head(msg: str) -> None:
 
 def get_default_icons_dir() -> Path:
     """Resolves base directory for asset libraries."""
-    env_dir = os.environ.get("SEADRIVE_ICONS")
-    if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    cand = Path.home() / "SeaDrive" / "My Libraries" / "Icons"
-    if cand.is_dir():
-        return cand
+    for env_var in ("SEAFILE_ICONS", "SEADRIVE_ICONS", "ICONS_DIR"):
+        env_dir = os.environ.get(env_var)
+        if env_dir:
+            return Path(env_dir).expanduser().resolve()
+
+    # Current working directory if named 'Icons' (case-insensitive)
+    cwd = Path.cwd().resolve()
+    if cwd.name.lower() == "icons":
+        return cwd
+
+    # Seafile desktop client local sync directory
+    cand_seafile = Path.home() / "Seafile" / "Icons"
+    if cand_seafile.is_dir():
+        return cand_seafile
+
+    # SeaDrive virtual mount
+    cand_seadrive = Path.home() / "SeaDrive" / "My Libraries" / "Icons"
+    if cand_seadrive.is_dir():
+        return cand_seadrive
+
     return (Path.home() / ".local" / "share" / "icons-archive").resolve()
 
 
-def get_default_proofs_dir() -> Path | None:
+def get_default_proofs_dir(icons_dir: Path | None = None) -> Path | None:
     """Resolves base directory for separated OpenTimestamps proofs library."""
-    env_dir = os.environ.get("SEADRIVE_PROOFS")
-    if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    cand = Path.home() / "SeaDrive" / "My Libraries" / "Icons-Proofs"
-    if cand.is_dir():
-        return cand
-    cand_alt = Path.home() / "SeaDrive" / "My Libraries" / "Proofs"
-    if cand_alt.is_dir():
-        return cand_alt
+    for env_var in ("SEAFILE_PROOFS", "SEADRIVE_PROOFS", "PROOFS_DIR"):
+        env_dir = os.environ.get(env_var)
+        if env_dir:
+            return Path(env_dir).expanduser().resolve()
+
+    # Sibling directory relative to resolved icons directory
+    base = icons_dir or get_default_icons_dir()
+    if base.is_dir():
+        cand_sibling_proofs = base.parent / f"{base.name}-Proofs"
+        if cand_sibling_proofs.is_dir():
+            return cand_sibling_proofs
+        cand_sibling_just_proofs = base.parent / "Proofs"
+        if cand_sibling_just_proofs.is_dir():
+            return cand_sibling_just_proofs
+
+    # Seafile desktop client local proofs directory
+    cand_seafile = Path.home() / "Seafile" / "Icons-Proofs"
+    if cand_seafile.is_dir():
+        return cand_seafile
+    cand_seafile_alt = Path.home() / "Seafile" / "Proofs"
+    if cand_seafile_alt.is_dir():
+        return cand_seafile_alt
+
+    # SeaDrive virtual mount
+    cand_seadrive = Path.home() / "SeaDrive" / "My Libraries" / "Icons-Proofs"
+    if cand_seadrive.is_dir():
+        return cand_seadrive
+    cand_seadrive_alt = Path.home() / "SeaDrive" / "My Libraries" / "Proofs"
+    if cand_seadrive_alt.is_dir():
+        return cand_seadrive_alt
+
     return None
 
 
@@ -261,13 +297,57 @@ def print_audit_report(asset_name: str, version: str, violations: list[dict[str,
     print("  " + "-" * 88 + "\n")
 
 
+def execute_init(
+    name: str,
+    version: str,
+    base_dir: Path | None = None,
+    proofs_dir: Path | None = None,
+) -> tuple[Path, Path | None]:
+    """Initializes standard asset folder hierarchy."""
+    icons_dir = base_dir or get_default_icons_dir()
+    resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
+
+    target_dir = icons_dir / name / version
+    raw_dir = target_dir / "01_source" / "raw"
+    master_dir = target_dir / "01_source" / "master"
+    signed_dir = target_dir / "02_signed"
+    dist_dir = target_dir / "03_dist"
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    master_dir.mkdir(parents=True, exist_ok=True)
+    signed_dir.mkdir(parents=True, exist_ok=True)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    target_proofs_dir = None
+    if resolved_proofs_dir:
+        target_proofs_dir = resolved_proofs_dir / name / version
+        (target_proofs_dir / "01_source" / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "01_source" / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "02_signed").mkdir(parents=True, exist_ok=True)
+
+    log_head(f"Initialized Asset Structure: {name} ({version})")
+    log_ok(f"Raw Project:    {raw_dir}")
+    log_ok(f"Master Image:   {master_dir}")
+    log_ok(f"Signed Release: {signed_dir}")
+    log_ok(f"Distribution:   {dist_dir}")
+    if target_proofs_dir:
+        log_ok(f"Proofs Archive: {target_proofs_dir}")
+
+    print(f"\n  {C_BOLD}Next steps:{C_RESET}")
+    print(f"    1. Place raw canvas (e.g. {name}.xcf) into: {C_CYAN}{raw_dir}/{C_RESET}")
+    print(f"    2. Place square master PNG into:            {C_CYAN}{master_dir}/{C_RESET}")
+    print(f"    3. Run build: {C_GREEN}build-image build {name} {version}{C_RESET}\n")
+
+    return target_dir, target_proofs_dir
+
+
 # ------------------------------------------------------------------------------
 # Build Pipeline: Source -> Signed -> Dist
 # ------------------------------------------------------------------------------
 def execute_build(
     name: str,
     version: str,
-    master_path: Path,
+    master_path: Path | None = None,
     raw_path: Path | None = None,
     base_dir: Path | None = None,
     proofs_dir: Path | None = None,
@@ -278,21 +358,49 @@ def execute_build(
     force_re_stamp: bool = False,
 ) -> None:
     """Executes atomic multi-scale build pipeline for an asset version."""
-    if not master_path.is_file():
-        log_err(f"Master file not found: {master_path}")
-        sys.exit(1)
-    if raw_path and not raw_path.is_file():
-        log_err(f"Raw project canvas file not found: {raw_path}")
-        sys.exit(1)
-
     icons_dir = base_dir or get_default_icons_dir()
-    resolved_proofs_dir = proofs_dir or get_default_proofs_dir()
+    resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
     target_dir = icons_dir / name / version
     src_dir = target_dir / "01_source"
     raw_dest_dir = src_dir / "raw"
     master_dest_dir = src_dir / "master"
     signed_dir = target_dir / "02_signed"
     dist_dir = target_dir / "03_dist"
+
+    # Auto-detect existing master if not explicitly provided
+    if master_path is None:
+        if master_dest_dir.is_dir():
+            candidates = [
+                f for f in sorted(master_dest_dir.iterdir())
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+            ]
+            if candidates:
+                master_path = candidates[0]
+                log_info(f"Auto-detected master image: {master_path.name}")
+
+    # Auto-detect existing raw canvas if not explicitly provided
+    if raw_path is None:
+        if raw_dest_dir.is_dir():
+            raw_candidates = [
+                f for f in sorted(raw_dest_dir.iterdir())
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+            ]
+            if raw_candidates:
+                raw_path = raw_candidates[0]
+                log_info(f"Auto-detected raw project canvas: {raw_path.name}")
+
+    # If master is still not found, initialize directories and give guidance
+    if master_path is None:
+        log_warn(f"No master image provided or found for '{name}' ({version}).")
+        execute_init(name, version, base_dir=icons_dir, proofs_dir=resolved_proofs_dir)
+        return
+
+    if not master_path.is_file():
+        log_err(f"Master file not found: {master_path}")
+        sys.exit(1)
+    if raw_path and not raw_path.is_file():
+        log_err(f"Raw project canvas file not found: {raw_path}")
+        sys.exit(1)
 
     target_proofs_dir = None
     if resolved_proofs_dir:
@@ -470,6 +578,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  build-image init duck v1
+  build-image build duck v1
   build-image build duck v1 --master duck_crop.png --raw duck.xcf
   build-image build duck v2 --master duck_new.png --bw-item c2pa-signer
   build-image audit duck v1
@@ -481,14 +591,21 @@ Examples:
 
     subparsers = parser.add_subparsers(dest="command", help="Command mode")
 
+    # Command: init
+    p_init = subparsers.add_parser("init", help="Initialize directory structure for an asset version")
+    p_init.add_argument("name", type=str, help="Asset identifier slug (e.g. duck, logo)")
+    p_init.add_argument("version", type=str, help="Version tag (e.g. v1, v2, 2026.1)")
+    p_init.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
+    p_init.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
+
     # Command: build
     p_build = subparsers.add_parser("build", help="Build and render an asset version from master")
     p_build.add_argument("name", type=str, help="Asset identifier slug (e.g. duck, logo)")
     p_build.add_argument("version", type=str, help="Version tag (e.g. v1, v2, 2026.1)")
-    p_build.add_argument("-m", "--master", type=Path, required=True, help="Normalized/cropped master square image (PNG/WEBP)")
-    p_build.add_argument("-r", "--raw", type=Path, help="Original project canvas before cropping (XCF, PSD, SVG, RAW)")
-    p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory (default: $SEADRIVE_ICONS)")
-    p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory (default: $SEADRIVE_PROOFS)")
+    p_build.add_argument("-m", "--master", type=Path, default=None, help="Normalized/cropped master square image (auto-detected if present in 01_source/master/)")
+    p_build.add_argument("-r", "--raw", type=Path, help="Original project canvas before cropping (auto-detected if present in 01_source/raw/)")
+    p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory (default: $SEAFILE_ICONS / $SEADRIVE_ICONS)")
+    p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory (default: $SEAFILE_PROOFS / $SEADRIVE_PROOFS)")
     p_build.add_argument("--sizes", type=str, default="512,256,128,64,32", help="Comma-separated dist resolutions")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const="c2pa-signer", type=str, help="Bitwarden item name for C2PA credentials")
     p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA signing of showcase release")
@@ -515,7 +632,7 @@ Examples:
     p_list.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     args_list = sys.argv[1:]
-    if args_list and args_list[0] not in ("build", "audit", "upgrade", "list", "-h", "--help"):
+    if args_list and args_list[0] not in ("build", "init", "audit", "upgrade", "list", "-h", "--help"):
         args_list.insert(0, "build")
 
     args = parser.parse_args(args_list)
@@ -525,9 +642,12 @@ Examples:
         sys.exit(0)
 
     base_dir = args.dir or get_default_icons_dir()
-    proofs_base = getattr(args, "proofs_dir", None) or get_default_proofs_dir()
+    proofs_base = getattr(args, "proofs_dir", None) or get_default_proofs_dir(base_dir)
 
-    if args.command == "build":
+    if args.command == "init":
+        execute_init(name=args.name, version=args.version, base_dir=base_dir, proofs_dir=proofs_base)
+
+    elif args.command == "build":
         try:
             parsed_sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
         except ValueError:

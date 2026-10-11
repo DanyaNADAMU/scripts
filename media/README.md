@@ -73,17 +73,20 @@ Structured media asset pipeline for icons, logos, and UI graphics across version
 
 #### Usage:
 ```bash
-# Build a new icon version with in-place proofs
-build-image build duck v1 --master duck_crop.png --raw duck.xcf
+# Initialize standard folder scaffolding for a new asset version
+build-image init duck v1
 
-# Build with segregated proofs library (Zero media files on server)
-build-image build duck v1 --master duck_crop.png --raw duck.xcf --proofs-dir ~/SeaDrive/"My Libraries"/Icons-Proofs
+# Drop files into 01_source/ and build with auto-detection
+build-image build duck v1
+
+# Build with explicit source paths
+build-image build duck v1 --master duck_crop.png --raw duck.xcf
 
 # Build with Bitwarden in-memory signing
 build-image build duck v2 --master duck_crop.png --bw-item c2pa-signer
 
 # Run full non-blocking integrity audit across all assets
-build-image audit --proofs-dir ~/SeaDrive/"My Libraries"/Icons-Proofs
+build-image audit
 
 # Recursively upgrade OTS proofs for a specific asset version
 build-image upgrade duck v1
