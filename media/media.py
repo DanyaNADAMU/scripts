@@ -1428,7 +1428,11 @@ def execute_build(
                 f for f in sorted(master_dest_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            if candidates:
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            if img_cands:
+                master_path = img_cands[0]
+                log_info(f"Auto-detected master image: {master_path.name}")
+            elif candidates:
                 master_path = candidates[0]
                 log_info(f"Auto-detected master image: {master_path.name}")
 
@@ -1439,7 +1443,11 @@ def execute_build(
                 f for f in sorted(raw_dest_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            if raw_candidates:
+            canvas_cands = [f for f in raw_candidates if f.suffix.lower() in (".xcf", ".psd", ".kra", ".svg", ".ai")]
+            if canvas_cands:
+                raw_path = canvas_cands[0]
+                log_info(f"Auto-detected raw project canvas: {raw_path.name}")
+            elif raw_candidates:
                 raw_path = raw_candidates[0]
                 log_info(f"Auto-detected raw project canvas: {raw_path.name}")
 
@@ -1489,9 +1497,12 @@ def execute_build(
 
     # 2. Stage 1: Preserve Raw Project Canvas
     if raw_path:
-        dest_raw = raw_dest_dir / raw_path.name
-        if dest_raw.resolve() != raw_path.resolve():
-            shutil.copyfile(raw_path, dest_raw)
+        if raw_path.parent.resolve() == raw_dest_dir.resolve():
+            dest_raw = raw_path
+        else:
+            dest_raw = raw_dest_dir / raw_path.name
+            if dest_raw.resolve() != raw_path.resolve():
+                shutil.copyfile(raw_path, dest_raw)
         if not no_stamp:
             local_ots = dest_raw.with_name(f"{dest_raw.name}.ots")
             final_ots = (
@@ -1510,9 +1521,12 @@ def execute_build(
         log_ok(f"Raw canvas secured: {dest_raw.name} (0444)")
 
     # 3. Stage 2: Preserve Normalized Master
-    dest_master = master_dest_dir / f"{name}_crop_master{master_path.suffix}"
-    if dest_master.resolve() != master_path.resolve():
-        shutil.copyfile(master_path, dest_master)
+    if master_path.parent.resolve() == master_dest_dir.resolve():
+        dest_master = master_path
+    else:
+        dest_master = master_dest_dir / master_path.name
+        if dest_master.resolve() != master_path.resolve():
+            shutil.copyfile(master_path, dest_master)
     if not no_stamp:
         local_ots = dest_master.with_name(f"{dest_master.name}.ots")
         final_ots = (
