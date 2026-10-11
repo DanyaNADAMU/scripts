@@ -78,8 +78,9 @@ check_dependencies() {
                 export PATH="$HOME/.local/bin:$PATH"
                 if [ "$scope" = "system" ] || [ "$EUID" -eq 0 ]; then
                     mkdir -p /usr/local/bin
-                    ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || true
-                    ln -sf "$HOME/.local/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true
+                    cp -f "$HOME/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || true
+                    cp -f "$HOME/.local/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true
+                    chmod 755 /usr/local/bin/uv /usr/local/bin/uvx 2>/dev/null || true
                 fi
             fi
         fi
