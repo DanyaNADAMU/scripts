@@ -447,6 +447,11 @@ def generate_c2pa_credentials(
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+    root_key_pem = root_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
     chain_pem = leaf_cert.public_bytes(serialization.Encoding.PEM) + root_cert.public_bytes(serialization.Encoding.PEM)
 
     if key_out:
@@ -455,7 +460,7 @@ def generate_c2pa_credentials(
     if cert_out:
         cert_out.write_bytes(chain_pem)
 
-    return leaf_key_pem, chain_pem
+    return leaf_key_pem, chain_pem, root_key_pem
 
 
 def parse_pem_bundle(text: str) -> tuple[bytes | None, bytes | None]:
@@ -473,30 +478,53 @@ def parse_pem_bundle(text: str) -> tuple[bytes | None, bytes | None]:
     return key_bytes, cert_bytes
 
 
-def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
-    """Fetches C2PA private key and certificate chain directly from Bitwarden into RAM (0 disk writes)."""
+def get_bitwarden_env() -> dict[str, str]:
+    """Ensures a valid Bitwarden session exists in RAM, prompting interactively if vault is locked."""
     if not shutil.which("bw"):
         log_err("Bitwarden CLI ('bw') is not installed or not found on PATH.")
         log_info("Install 'bw' from https://bitwarden.com/help/cli/ to enable in-memory vault loading.")
         sys.exit(1)
 
-    bw_session = os.environ.get("BW_SESSION")
-    if not bw_session:
-        res_status = subprocess.run(["bw", "status"], capture_output=True, text=True)
-        try:
-            status_data = json.loads(res_status.stdout)
-            if status_data.get("status") != "unlocked":
-                log_err("Bitwarden vault is locked or BW_SESSION is not set.")
-                log_info(f"Unlock vault in your shell: {C_BOLD}export BW_SESSION=$(bw unlock --raw){C_RESET}")
-                sys.exit(1)
-        except Exception:
-            log_err("Bitwarden vault is locked or BW_SESSION is not set.")
-            log_info(f"Unlock vault in your shell: {C_BOLD}export BW_SESSION=$(bw unlock --raw){C_RESET}")
+    bw_env = dict(os.environ)
+    if bw_env.get("BW_SESSION"):
+        return bw_env
+
+    res_status = subprocess.run(["bw", "status"], capture_output=True, text=True, env=bw_env)
+    try:
+        status_data = json.loads(res_status.stdout)
+        if status_data.get("status") == "unlocked":
+            return bw_env
+    except Exception:
+        pass
+
+    if sys.stdin.isatty():
+        log_info("Bitwarden vault is locked. Authenticate for ephemeral in-memory access:")
+        proc = subprocess.run(
+            ["bw", "unlock", "--raw"],
+            stdin=sys.stdin,
+            stderr=sys.stderr,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            bw_env["BW_SESSION"] = proc.stdout.strip()
+            return bw_env
+        else:
+            log_err("Bitwarden authentication cancelled or failed.")
             sys.exit(1)
+    else:
+        log_err("Bitwarden vault is locked and no interactive terminal (TTY) is available.")
+        log_info(f"Unlock vault in your shell: {C_BOLD}export BW_SESSION=$(bw unlock --raw){C_RESET}")
+        sys.exit(1)
+
+
+def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
+    """Fetches C2PA private key and certificate chain directly from Bitwarden into RAM (0 disk writes)."""
+    bw_env = get_bitwarden_env()
 
     log_info(f"Retrieving signing credentials from Bitwarden item '{item_name}' into RAM...")
     cmd = ["bw", "get", "item", item_name]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, env=bw_env)
     if res.returncode != 0:
         log_err(f"Bitwarden item '{item_name}' not found: {res.stderr.strip()}")
         sys.exit(1)
@@ -538,6 +566,7 @@ def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
                 att_res = subprocess.run(
                     ["bw", "get", "attachment", aid, "--itemid", item_id, "--raw"],
                     capture_output=True,
+                    env=bw_env,
                 )
                 if att_res.returncode == 0:
                     key_bytes = att_res.stdout.strip()
@@ -545,6 +574,7 @@ def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
                 att_res = subprocess.run(
                     ["bw", "get", "attachment", aid, "--itemid", item_id, "--raw"],
                     capture_output=True,
+                    env=bw_env,
                 )
                 if att_res.returncode == 0:
                     cert_bytes = att_res.stdout.strip()
@@ -557,13 +587,17 @@ def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
     return key_bytes, cert_bytes
 
 
-def save_credentials_to_bitwarden(item_name: str, key_pem: bytes, cert_pem: bytes, domain: str) -> None:
+def save_credentials_to_bitwarden(
+    item_name: str,
+    key_pem: bytes,
+    cert_pem: bytes,
+    domain: str,
+    root_key_pem: bytes | None = None,
+) -> None:
     """Stores credentials directly into Bitwarden vault as a Secure Note (zero disk writes)."""
-    if not shutil.which("bw"):
-        log_err("Bitwarden CLI ('bw') is required to push credentials directly to Bitwarden.")
-        sys.exit(1)
+    bw_env = get_bitwarden_env()
 
-    template_res = subprocess.run(["bw", "get", "template", "item"], capture_output=True, text=True)
+    template_res = subprocess.run(["bw", "get", "template", "item"], capture_output=True, text=True, env=bw_env)
     if template_res.returncode != 0:
         log_err(f"Failed to get Bitwarden item template: {template_res.stderr.strip()}")
         sys.exit(1)
@@ -572,17 +606,24 @@ def save_credentials_to_bitwarden(item_name: str, key_pem: bytes, cert_pem: byte
     item_tpl["name"] = item_name
     item_tpl["type"] = 2  # Secure Note
     item_tpl["secureNote"] = {"type": 0}
-    item_tpl["notes"] = f"{key_pem.decode('utf-8').strip()}\n\n{cert_pem.decode('utf-8').strip()}\n"
+    note_content = [key_pem.decode("utf-8").strip(), cert_pem.decode("utf-8").strip()]
+    if root_key_pem:
+        note_content.append(root_key_pem.decode("utf-8").strip())
+    item_tpl["notes"] = "\n\n".join(note_content) + "\n"
     item_tpl["fields"] = [
         {"name": "key", "value": key_pem.decode("utf-8").strip(), "type": 1},
         {"name": "cert", "value": cert_pem.decode("utf-8").strip(), "type": 0},
         {"name": "domain", "value": domain, "type": 0},
     ]
+    if root_key_pem:
+        item_tpl["fields"].append(
+            {"name": "root_key", "value": root_key_pem.decode("utf-8").strip(), "type": 1}
+        )
 
-    encoded_res = subprocess.run(["bw", "encode"], input=json.dumps(item_tpl), capture_output=True, text=True)
+    encoded_res = subprocess.run(["bw", "encode"], input=json.dumps(item_tpl), capture_output=True, text=True, env=bw_env)
     payload = encoded_res.stdout.strip() if encoded_res.returncode == 0 else json.dumps(item_tpl)
 
-    create_res = subprocess.run(["bw", "create", "item", payload], capture_output=True, text=True)
+    create_res = subprocess.run(["bw", "create", "item", payload], capture_output=True, text=True, env=bw_env)
     if create_res.returncode != 0:
         log_err(f"Failed to create Bitwarden item: {create_res.stderr.strip()}")
         sys.exit(1)
@@ -623,7 +664,7 @@ def load_or_create_credentials(
 
     k_file.parent.mkdir(parents=True, exist_ok=True)
     log_info(f"Generating dedicated local C2PA certificates for {domain} in {k_file.parent}...")
-    k_bytes, c_bytes = generate_c2pa_credentials(domain, key_out=k_file, cert_out=c_file)
+    k_bytes, c_bytes, _ = generate_c2pa_credentials(domain, key_out=k_file, cert_out=c_file)
     log_ok("Local credentials created and initialized.")
     return k_bytes, c_bytes
 
@@ -1716,8 +1757,8 @@ def keys_gen(domain: str = DEFAULT_DOMAIN, bw_item: str | None = None, out_dir: 
     """Generates new Root CA + Leaf C2PA credentials."""
     if bw_item:
         log_head(f"Generating C2PA credentials directly in Bitwarden vault: '{bw_item}'...")
-        k_bytes, c_bytes = generate_c2pa_credentials(domain)
-        save_credentials_to_bitwarden(bw_item, k_bytes, c_bytes, domain)
+        k_bytes, c_bytes, r_bytes = generate_c2pa_credentials(domain)
+        save_credentials_to_bitwarden(bw_item, k_bytes, c_bytes, domain, root_key_pem=r_bytes)
         cfg = load_config()
         cfg["bitwarden_item"] = bw_item
         save_config(cfg)
