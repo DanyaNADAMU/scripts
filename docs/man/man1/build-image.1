@@ -1,0 +1,108 @@
+.TH BUILD-IMAGE 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+build-image \- structured media asset pipeline with audit, C2PA signing, and multi-scale dist rendering
+.SH SYNOPSIS
+.B build-image
+.RB [ build ]
+.I name
+.I version
+.BI \-m " master"
+.RB [ \-r " raw" ]
+.RB [ \-d " dir" ]
+.RB [ \-\-sizes " sizes" ]
+.RB [ \-\-bw " [" \fIitem\fR ]]
+.RB [ \-\-bw\-item " item" ]
+.RB [ \-\-no\-sign ]
+.RB [ \-\-no\-stamp ]
+.RB [ \-\-force\-re\-stamp ]
+.br
+.B build-image audit
+.RI [ name ]
+.RI [ version ]
+.RB [ \-d " dir" ]
+.br
+.B build-image upgrade
+.RI [ name ]
+.RI [ version ]
+.RB [ \-d " dir" ]
+.br
+.B build-image list
+.RB [ \-d " dir" ]
+.SH DESCRIPTION
+\fBbuild-image\fR implements an automated, structured asset generation and lifecycle management pipeline for icons, logos, and graphic resources.
+It enforces strict provenance tracking, non-destructive versioning, and zero-overhead distribution across a standardized 3-tier hierarchy:
+.PP
+.TP
+.B 01_source/
+Immutable original assets locked with read-only permissions (\fBchmod 0444\fR) and anchored in the Bitcoin blockchain via OpenTimestamps (\fI.ots\fR).
+Divided into \fBraw/\fR (original full-canvas work files, e.g. \fI.xcf\fR, \fI.psd\fR, \fI.svg\fR) and \fBmaster/\fR (normalized cropped square master image).
+.TP
+.B 02_signed/
+High-resolution showcase release (1024x1024) cryptographically bound to the author using C2PA provenance manifests, invisible frequency-domain watermarking (DWT-DCT), and OpenTimestamps.
+.TP
+.B 03_dist/
+Clean, lightweight production distribution bundle downscaled across standard resolutions (512, 256, 128, 64, 32 in both WebP and PNG) and a multi-layer \fBfavicon.ico\fR (16 to 256 px).
+Distribution files are completely free from metadata bloating (no C2PA manifest overhead, no steganographic modifications).
+Derivatives do not carry individual \fI.ots\fR proofs because their provenance is mathematically rooted in the timestamped master image.
+.PP
+Each asset directory contains an atomic symlink \fBlatest\fR pointing to the currently active version tag.
+.SH COMMANDS
+.TP
+.B build
+Constructs a complete versioned release from source materials. Performs pre-flight integrity auditing, locks source files (\fB0444\fR), anchors sources with OpenTimestamps, produces the signed 1024px showcase, generates downscaled distribution formats, and updates the \fBlatest\fR symlink.
+.TP
+.B audit
+Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
+Collects and displays all integrity violations in a single unified report without failing fast on the first error.
+Detects hash mismatches (content altered after timestamping), missing proofs (source files lacking \fI.ots\fR), corrupted proofs, and orphaned proofs (\fI.ots\fR without media files).
+.TP
+.B upgrade
+Recursively queries OpenTimestamps calendar servers to upgrade pending proofs in an asset tree into finalized Bitcoin block header attestations. Original media files are not touched or needed during this upgrade.
+.TP
+.B list
+Scans the managed icons library and lists all assets, available versions, and current \fBlatest\fR pointers.
+.SH OPTIONS
+.TP
+.BI \-m ", " \-\-master " file"
+Path to normalized/cropped square master image (PNG, WebP, etc.). Required for \fBbuild\fR.
+.TP
+.BI \-r ", " \-\-raw " file"
+Path to original uncropped project canvas or raw work file (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR).
+.TP
+.BI \-d ", " \-\-dir " path"
+Base directory for the managed icons library (default: \fB$SEADRIVE_ICONS\fR or \fI~/SeaDrive/My Libraries/Icons\fR).
+.TP
+.BI \-\-sizes " list"
+Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).
+.TP
+.BR \-\-bw " [" \fIitem\fR ], " \-\-bw\-item " \fIitem\fR
+Fetches C2PA private key and certificate directly from Bitwarden into RAM without writing any secret bytes to disk.
+.TP
+.B \-\-no\-sign
+Skips C2PA cryptographic manifest generation and invisible watermarking for the 1024px showcase release.
+.TP
+.B \-\-no\-stamp
+Skips OpenTimestamps Bitcoin anchoring.
+.TP
+.B \-\-force\-re\-stamp
+Bypasses pre-flight audit mismatch aborts and forces recalculation of OpenTimestamps proofs.
+.SH ENVIRONMENT
+.TP
+.B SEADRIVE_ICONS
+Path to the base directory of the icons library. Overrides standard default paths.
+.TP
+.B BW_SESSION
+Active Bitwarden vault unlock session key required for \fB\-\-bw\fR.
+.TP
+.B C2PA_BW_ITEM
+Default Bitwarden vault item name for signing credentials.
+.SH FILES
+.TP
+.I ~/SeaDrive/My Libraries/Icons/
+Default location for the managed asset library in SeaDrive.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR sign\-image (1),
+.BR backup\-seadrive (1),
+.BR scripts (1)

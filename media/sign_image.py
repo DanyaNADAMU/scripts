@@ -29,7 +29,9 @@ import io
 import json
 import os
 import random
+import re
 import shutil
+import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -64,8 +66,9 @@ DEFAULT_AUTHOR = "DanyaNADAMU <git@nada.mu>"
 DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 DEFAULT_WATERMARK = "NADAMU"
+DEFAULT_BW_ITEM = "c2pa-signer"
 APP_NAME = "sign-image"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -112,6 +115,7 @@ def load_config() -> dict[str, Any]:
         "watermark_delta": 35.0,
         "watermark_repeats": 3,
         "auto_stamp": False,
+        "bitwarden_item": None,
     }
 
     if DEFAULT_CONFIG_FILE.is_file():
@@ -322,11 +326,14 @@ def get_default_secret() -> str:
 # ------------------------------------------------------------------------------
 def generate_c2pa_credentials(
     domain: str = DEFAULT_DOMAIN,
-    key_out: Path = DEFAULT_KEY_PATH,
-    cert_out: Path = DEFAULT_CERT_PATH,
+    key_out: Path | None = DEFAULT_KEY_PATH,
+    cert_out: Path | None = DEFAULT_CERT_PATH,
 ) -> tuple[bytes, bytes]:
-    """Generates a compliant 2-tier C2PA X.509 certificate chain (Root CA + Leaf)."""
-    key_out.parent.mkdir(parents=True, exist_ok=True)
+    """Generates a compliant 2-tier C2PA X.509 certificate chain (Root CA + Leaf).
+    If key_out and cert_out are None, credentials exist strictly in memory without writing to disk.
+    """
+    if key_out:
+        key_out.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Root CA
     root_key = ec.generate_private_key(ec.SECP256R1())
@@ -420,23 +427,209 @@ def generate_c2pa_credentials(
     )
     chain_pem = leaf_cert.public_bytes(serialization.Encoding.PEM) + root_cert.public_bytes(serialization.Encoding.PEM)
 
-    key_out.write_bytes(leaf_key_pem)
-    cert_out.write_bytes(chain_pem)
-    os.chmod(key_out, 0o600)
+    if key_out:
+        key_out.write_bytes(leaf_key_pem)
+        os.chmod(key_out, 0o600)
+    if cert_out:
+        cert_out.write_bytes(chain_pem)
 
     return leaf_key_pem, chain_pem
 
 
+# ------------------------------------------------------------------------------
+# Bitwarden & In-Memory Vault Integration
+# ------------------------------------------------------------------------------
+def parse_pem_bundle(text: str) -> tuple[bytes | None, bytes | None]:
+    """Extracts private key and certificate chain PEM blocks from text."""
+    key_match = re.search(
+        r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----",
+        text,
+    )
+    cert_matches = re.findall(
+        r"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----",
+        text,
+    )
+    key_bytes = key_match.group(0).strip().encode("utf-8") if key_match else None
+    cert_bytes = "\n".join(c.strip() for c in cert_matches).encode("utf-8") if cert_matches else None
+    return key_bytes, cert_bytes
+
+
+def fetch_bitwarden_credentials(item_name: str) -> tuple[bytes, bytes]:
+    """Fetches C2PA private key and certificate chain directly from Bitwarden into RAM.
+    Zero bytes are written to disk.
+    """
+    if not shutil.which("bw"):
+        log_err("Bitwarden CLI ('bw') is not installed or not found on PATH.")
+        log_info("Install 'bw' from https://bitwarden.com/help/cli/ to enable in-memory vault loading.")
+        sys.exit(1)
+
+    bw_session = os.environ.get("BW_SESSION")
+    if not bw_session:
+        res_status = subprocess.run(["bw", "status"], capture_output=True, text=True)
+        try:
+            status_data = json.loads(res_status.stdout)
+            if status_data.get("status") != "unlocked":
+                log_err("Bitwarden vault is locked or BW_SESSION is not set.")
+                log_info("Unlock your vault in your shell and export the session token:")
+                log_info(f"  {C_BOLD}export BW_SESSION=$(bw unlock --raw){C_RESET}")
+                sys.exit(1)
+        except Exception:
+            log_err("Bitwarden vault is locked or BW_SESSION is not set.")
+            log_info(f"  {C_BOLD}export BW_SESSION=$(bw unlock --raw){C_RESET}")
+            sys.exit(1)
+
+    log_info(f"Retrieving signing credentials from Bitwarden item '{item_name}' into RAM...")
+    cmd = ["bw", "get", "item", item_name]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        log_err(f"Bitwarden item '{item_name}' not found or inaccessible: {res.stderr.strip()}")
+        sys.exit(1)
+
+    try:
+        item = json.loads(res.stdout)
+    except json.JSONDecodeError as e:
+        log_err(f"Failed to parse Bitwarden JSON output: {e}")
+        sys.exit(1)
+
+    key_bytes: bytes | None = None
+    cert_bytes: bytes | None = None
+
+    # 1. Custom fields
+    fields = item.get("fields", [])
+    for field in fields:
+        fname = (field.get("name") or "").lower().strip()
+        fval = field.get("value") or ""
+        if fname in ("key", "private_key", "privkey", "c2pa_key", "es256_key"):
+            key_bytes = fval.strip().encode("utf-8")
+        elif fname in ("cert", "certs", "certificate", "c2pa_cert", "chain"):
+            cert_bytes = fval.strip().encode("utf-8")
+
+    # 2. Secure Note body (e.g. pasted output of 'sign-image credentials --export')
+    notes = item.get("notes") or ""
+    if not key_bytes or not cert_bytes:
+        k_extracted, c_extracted = parse_pem_bundle(notes)
+        if not key_bytes and k_extracted:
+            key_bytes = k_extracted
+        if not cert_bytes and c_extracted:
+            cert_bytes = c_extracted
+
+    # 3. Item attachments
+    if not key_bytes or not cert_bytes:
+        item_id = item.get("id")
+        attachments = item.get("attachments", [])
+        for att in attachments:
+            aname = att.get("fileName", "").lower()
+            aid = att.get("id")
+            if not key_bytes and (".key" in aname or "priv" in aname):
+                log_info(f"Fetching key attachment '{att.get('fileName')}' into memory...")
+                att_res = subprocess.run(
+                    ["bw", "get", "attachment", aid, "--itemid", item_id, "--raw"],
+                    capture_output=True,
+                )
+                if att_res.returncode == 0:
+                    key_bytes = att_res.stdout.strip()
+            elif not cert_bytes and (".pem" in aname or ".crt" in aname or "cert" in aname):
+                log_info(f"Fetching certificate attachment '{att.get('fileName')}' into memory...")
+                att_res = subprocess.run(
+                    ["bw", "get", "attachment", aid, "--itemid", item_id, "--raw"],
+                    capture_output=True,
+                )
+                if att_res.returncode == 0:
+                    cert_bytes = att_res.stdout.strip()
+
+    if not key_bytes or not cert_bytes:
+        log_err(f"Could not find valid EC private key and certificate chain in Bitwarden item '{item_name}'.")
+        log_info("Ensure the item in Bitwarden contains:")
+        log_info("  • Custom fields named 'key' and 'cert'")
+        log_info("  • Or a Secure Note containing PEM blocks (from 'sign-image credentials --export')")
+        log_info("  • Or attachments 'es256_private.key' and 'es256_certs.pem'")
+        sys.exit(1)
+
+    log_ok("Loaded credentials from Bitwarden strictly in-memory (0 bytes stored on disk).")
+    return key_bytes, cert_bytes
+
+
+def save_credentials_to_bitwarden(item_name: str, key_pem: bytes, cert_pem: bytes, domain: str) -> None:
+    """Stores credentials directly into Bitwarden vault as a Secure Note (zero disk writes)."""
+    if not shutil.which("bw"):
+        log_err("Bitwarden CLI ('bw') is required to save credentials directly to Bitwarden.")
+        sys.exit(1)
+
+    template_res = subprocess.run(["bw", "get", "template", "item"], capture_output=True, text=True)
+    if template_res.returncode != 0:
+        log_err(f"Failed to get Bitwarden item template: {template_res.stderr.strip()}")
+        sys.exit(1)
+
+    item_tpl = json.loads(template_res.stdout)
+    item_tpl["name"] = item_name
+    item_tpl["type"] = 2  # Secure Note
+    item_tpl["secureNote"] = {"type": 0}
+    item_tpl["notes"] = f"{key_pem.decode('utf-8').strip()}\n\n{cert_pem.decode('utf-8').strip()}\n"
+    item_tpl["fields"] = [
+        {"name": "key", "value": key_pem.decode("utf-8").strip(), "type": 1},
+        {"name": "cert", "value": cert_pem.decode("utf-8").strip(), "type": 0},
+        {"name": "domain", "value": domain, "type": 0},
+    ]
+
+    encoded_res = subprocess.run(["bw", "encode"], input=json.dumps(item_tpl), capture_output=True, text=True)
+    payload = encoded_res.stdout.strip() if encoded_res.returncode == 0 else json.dumps(item_tpl)
+
+    create_res = subprocess.run(["bw", "create", "item", payload], capture_output=True, text=True)
+    if create_res.returncode != 0:
+        log_err(f"Failed to create Bitwarden item: {create_res.stderr.strip()}")
+        sys.exit(1)
+
+    log_ok(f"Created Bitwarden Secure Note '{item_name}' with signing keys (Zero files written to disk).")
+
+
+def load_env_credentials() -> tuple[bytes, bytes] | None:
+    """Reads C2PA private key and certificate chain from environment variables if present."""
+    k = os.environ.get("C2PA_PRIVATE_KEY")
+    c = os.environ.get("C2PA_CERT") or os.environ.get("C2PA_CERTS")
+    if k and c:
+        return k.strip().encode("utf-8"), c.strip().encode("utf-8")
+    return None
+
+
 def load_or_create_credentials(
-    key_path: Path | None, cert_path: Path | None, domain: str
+    key_path: Path | None = None,
+    cert_path: Path | None = None,
+    domain: str = DEFAULT_DOMAIN,
+    bw_item: str | None = None,
 ) -> tuple[bytes, bytes]:
-    """Loads existing credentials or automatically generates persistent credentials."""
+    """Loads existing credentials or fetches from Bitwarden/environment.
+    If Bitwarden or environment variables are used, keys are stored strictly in memory.
+    """
+    # 1. Environment variables
+    env_creds = load_env_credentials()
+    if env_creds:
+        log_info("Using C2PA credentials from environment variables (in-memory, 0 disk files).")
+        return env_creds
+
+    # 2. Bitwarden in-memory
+    cfg = load_config()
+    target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
+    if target_bw:
+        return fetch_bitwarden_credentials(target_bw)
+
+    # 3. Explicit local files
+    if key_path and cert_path:
+        if not key_path.is_file():
+            log_err(f"Key file not found: {key_path}")
+            sys.exit(1)
+        if not cert_path.is_file():
+            log_err(f"Cert file not found: {cert_path}")
+            sys.exit(1)
+        return key_path.read_bytes(), cert_path.read_bytes()
+
+    # 4. Local disk default paths
     kp = key_path or DEFAULT_KEY_PATH
     cp = cert_path or DEFAULT_CERT_PATH
 
     if kp.is_file() and cp.is_file():
         return kp.read_bytes(), cp.read_bytes()
 
+    # 5. Default generation on disk
     log_info(f"Generating persistent C2PA credentials for {domain} in {kp.parent}...")
     key_bytes, cert_bytes = generate_c2pa_credentials(domain, kp, cp)
     log_ok(f"Generated signing key: {kp}")
@@ -448,8 +641,50 @@ def manage_credentials(
     export_raw: bool = False,
     import_key: Path | None = None,
     import_cert: Path | None = None,
+    bw_item: str | None = None,
+    bw_push: str | None = None,
 ) -> None:
-    """Exports or imports C2PA credentials for backup to Bitwarden or deployment to prod."""
+    """Exports, imports, pushes or inspects C2PA credentials in Bitwarden or local storage."""
+    cfg = load_config()
+    target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
+
+    if bw_push:
+        # Push active credentials into Bitwarden
+        if DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file():
+            k_bytes = DEFAULT_KEY_PATH.read_bytes()
+            c_bytes = DEFAULT_CERT_PATH.read_bytes()
+        else:
+            log_info(f"Generating new in-memory credentials for {cfg.get('domain', DEFAULT_DOMAIN)}...")
+            k_bytes, c_bytes = generate_c2pa_credentials(cfg.get("domain", DEFAULT_DOMAIN), None, None)
+        save_credentials_to_bitwarden(bw_push, k_bytes, c_bytes, cfg.get("domain", DEFAULT_DOMAIN))
+        log_info("Tip: You can now delete local files to keep keys strictly in Bitwarden:")
+        log_info(f"  rm -f {DEFAULT_KEY_PATH} {DEFAULT_CERT_PATH}")
+        return
+
+    if target_bw and not (import_key or import_cert):
+        k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
+        if export_raw:
+            print("# ==============================================================================")
+            print(f"# C2PA PRIVATE KEY (Bitwarden: {target_bw})")
+            print("# ==============================================================================")
+            print(k_bytes.decode("utf-8").strip())
+            print("\n# ==============================================================================")
+            print(f"# C2PA CERTIFICATE CHAIN (Bitwarden: {target_bw})")
+            print("# ==============================================================================")
+            print(c_bytes.decode("utf-8").strip())
+            return
+
+        certs = x509.load_pem_x509_certificates(c_bytes)
+        leaf = certs[0]
+        log_head(f"C2PA Signing Credentials (Active - Bitwarden: {target_bw})")
+        print(f"  {C_BOLD}Key Storage:{C_RESET}  Bitwarden Vault [In-Memory Only, 0 files on disk]")
+        print(f"  {C_BOLD}Subject:{C_RESET}      {leaf.subject.rfc4514_string()}")
+        print(f"  {C_BOLD}Issuer:{C_RESET}       {leaf.issuer.rfc4514_string()}")
+        print(f"  {C_BOLD}Fingerprint:{C_RESET}  SHA256:{leaf.fingerprint(hashes.SHA256()).hex()}")
+        print(f"  {C_BOLD}Valid Until:{C_RESET}  {leaf.not_valid_after_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"  {C_BOLD}Chain Length:{C_RESET} {len(certs)} certificate(s)\n")
+        return
+
     DEFAULT_KEY_DIR.mkdir(parents=True, exist_ok=True)
 
     if import_key or import_cert:
@@ -472,7 +707,6 @@ def manage_credentials(
         return
 
     if not (DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file()):
-        cfg = load_config()
         log_info(f"Credentials not found. Generating initial credentials in {DEFAULT_KEY_DIR}...")
         generate_c2pa_credentials(cfg.get("domain", DEFAULT_DOMAIN))
 
@@ -491,7 +725,7 @@ def manage_credentials(
     certs = x509.load_pem_x509_certificates(cert_data)
     leaf = certs[0]
 
-    log_head("C2PA Signing Credentials (Active)")
+    log_head("C2PA Signing Credentials (Active - Local Disk)")
     print(f"  {C_BOLD}Key Path:{C_RESET}     {DEFAULT_KEY_PATH} (0600)")
     print(f"  {C_BOLD}Cert Path:{C_RESET}    {DEFAULT_CERT_PATH}")
     print(f"  {C_BOLD}Config File:{C_RESET}  {DEFAULT_CONFIG_FILE}")
@@ -501,11 +735,12 @@ def manage_credentials(
     print(f"  {C_BOLD}Valid Until:{C_RESET}  {leaf.not_valid_after_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"  {C_BOLD}Chain Length:{C_RESET} {len(certs)} certificate(s)")
 
-    print(f"\n  {C_CYAN}[Tip for Bitwarden / Backup]:{C_RESET}")
-    print("    To copy private key & cert to clipboard for Bitwarden:")
-    print(f"      {C_BOLD}sign-image credentials --export{C_RESET}")
-    print("    To restore on another production machine:")
-    print(f"      {C_BOLD}sign-image credentials --import-key key.pem --import-cert cert.pem{C_RESET}\n")
+    print(f"\n  {C_CYAN}[Bitwarden In-Memory Usage]:{C_RESET}")
+    print("    To push local keys to Bitwarden and stop storing them on disk:")
+    print(f"      {C_BOLD}sign-image credentials --bw-push c2pa-signer{C_RESET}")
+    print(f"      {C_BOLD}rm -f {DEFAULT_KEY_PATH} {DEFAULT_CERT_PATH}{C_RESET}")
+    print("    To sign directly with Bitwarden in RAM (zero disk files):")
+    print(f"      {C_BOLD}sign-image sign --bw photo.png{C_RESET}\n")
 
 
 # ------------------------------------------------------------------------------
@@ -558,7 +793,47 @@ def stamp_media_file(
 
 
 def upgrade_ots_file(target_file: Path) -> bool:
-    """Upgrades a pending .ots proof file against calendar servers once Bitcoin block confirms."""
+    """Upgrades a pending .ots proof file, or recursively upgrades all .ots files in a directory."""
+    if target_file.is_dir():
+        ots_files = sorted(target_file.rglob("*.ots"))
+        if not ots_files:
+            log_warn(f"No .ots files found in directory: {target_file}")
+            return True
+
+        log_head(f"Upgrading {len(ots_files)} OpenTimestamps Proof(s) in {target_file}...")
+        confirmed_count = 0
+        pending_count = 0
+        error_count = 0
+
+        for ots_path in ots_files:
+            rel_display = str(ots_path.relative_to(target_file))
+            cli_args = ["upgrade", str(ots_path)]
+            try:
+                parsed_args = otsclient.args.parse_ots_args(cli_args)
+                try:
+                    parsed_args.cmd_func(parsed_args)
+                    log_ok(f"Confirmed in Bitcoin: {rel_display}")
+                    confirmed_count += 1
+                except SystemExit as se:
+                    if se.code == 0:
+                        log_ok(f"Confirmed in Bitcoin: {rel_display}")
+                        confirmed_count += 1
+                    else:
+                        log_info(f"Still pending:        {rel_display}")
+                        pending_count += 1
+            except Exception as e:
+                log_warn(f"Failed {rel_display}: {e}")
+                error_count += 1
+
+        print(f"\n  {C_BOLD}Upgrade Summary:{C_RESET}")
+        print(f"    {C_GREEN}[✓] Confirmed: {confirmed_count}{C_RESET}")
+        print(f"    {C_BLUE}[i] Pending:   {pending_count}{C_RESET}")
+        if error_count:
+            print(f"    {C_RED}[✗] Errors:    {error_count}{C_RESET}\n")
+        else:
+            print()
+        return error_count == 0
+
     ots_path = target_file if target_file.name.endswith(".ots") else target_file.with_name(f"{target_file.name}.ots")
     if not ots_path.is_file():
         log_err(f"Timestamp file not found: {ots_path}")
@@ -583,6 +858,107 @@ def upgrade_ots_file(target_file: Path) -> bool:
     except Exception as e:
         log_err(f"Upgrade failed: {e}")
         return False
+
+
+def setup_ots_timer(target_dir: Path | None, interval: str = "2h") -> None:
+    """Installs and enables a systemd user timer to periodically upgrade .ots files in a directory."""
+    systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
+    systemd_user_dir.mkdir(parents=True, exist_ok=True)
+
+    chosen_dir: Path
+    if target_dir is None or str(target_dir) in ("DEFAULT", "None"):
+        cand = Path.home() / "SeaDrive" / "My Libraries" / "Icons"
+        chosen_dir = cand if cand.is_dir() else (Path.home() / ".config" / "nadamu")
+    else:
+        chosen_dir = target_dir
+
+    chosen_dir = chosen_dir.expanduser().resolve()
+    service_path = systemd_user_dir / "sign-image-ots.service"
+    timer_path = systemd_user_dir / "sign-image-ots.timer"
+
+    bin_path = shutil.which("sign-image") or str(Path(__file__).resolve())
+
+    service_content = f"""[Unit]
+Description=Periodic OpenTimestamps Proof Upgrade ({chosen_dir})
+Documentation=man:sign-image(1)
+After=network.target network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={bin_path} stamp --upgrade "{chosen_dir}"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+
+    timer_content = f"""[Unit]
+Description=Periodic OpenTimestamps Upgrade Timer ({interval})
+Documentation=man:sign-image(1)
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec={interval}
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+"""
+
+    service_path.write_text(service_content, encoding="utf-8")
+    timer_path.write_text(timer_content, encoding="utf-8")
+
+    log_head("OpenTimestamps Systemd User Timer Configured")
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "sign-image-ots.timer"], check=False)
+        log_ok("Timer successfully enabled and started.")
+        print(f"  {C_BOLD}Timer Unit:{C_RESET}    {timer_path}")
+        print(f"  {C_BOLD}Service Unit:{C_RESET}  {service_path}")
+        print(f"  {C_BOLD}Target Folder:{C_RESET} {chosen_dir}")
+        print(f"  {C_BOLD}Interval:{C_RESET}      every {interval}")
+        print(f"  {C_BOLD}Status Command:{C_RESET} sign-image stamp --timer-status\n")
+    else:
+        log_ok(f"Unit files written to {systemd_user_dir} (systemctl not available in current session).\n")
+
+
+def remove_ots_timer() -> None:
+    """Disables and removes the systemd user timer for .ots upgrades."""
+    systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
+    service_path = systemd_user_dir / "sign-image-ots.service"
+    timer_path = systemd_user_dir / "sign-image-ots.timer"
+
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "disable", "--now", "sign-image-ots.timer"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["systemctl", "--user", "stop", "sign-image-ots.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    service_path.unlink(missing_ok=True)
+    timer_path.unlink(missing_ok=True)
+
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+
+    log_ok("Systemd user timer sign-image-ots.timer removed.\n")
+
+
+def show_ots_timer_status() -> None:
+    """Displays the status of the systemd user timer for .ots upgrades."""
+    systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
+    timer_path = systemd_user_dir / "sign-image-ots.timer"
+
+    if not timer_path.is_file():
+        log_warn("Systemd user timer is not installed.")
+        print("  Install it via: sign-image stamp --setup-timer [DIR]\n")
+        return
+
+    log_head("OpenTimestamps Upgrade Timer Status")
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "status", "sign-image-ots.timer", "--no-pager"], check=False)
+    else:
+        print(timer_path.read_text(encoding="utf-8"))
+    print()
 
 
 def inspect_ots_proof(target_file: Path, ots_path: Path | None = None) -> dict[str, Any] | None:
@@ -664,6 +1040,7 @@ def process_signing(
     secret: str | None = None,
     key_path: Path | None = None,
     cert_path: Path | None = None,
+    bw_item: str | None = None,
 ) -> None:
     """Executes multi-layer signing (DWT-DCT steganography + C2PA Credentials + OpenTimestamps)."""
     if not input_path.is_file():
@@ -678,7 +1055,6 @@ def process_signing(
     act_license = license_text or cfg.get("default_license", "")
     src_type = cfg.get("digital_source_type", DEFAULT_SOURCE_TYPE)
     wm_text = watermark_payload or cfg.get("watermark_text", DEFAULT_WATERMARK)
-    wm_secret = secret or get_default_secret()
     wm_delta = float(cfg.get("watermark_delta", 35.0))
     wm_repeats = int(cfg.get("watermark_repeats", 3))
 
@@ -690,6 +1066,25 @@ def process_signing(
     log_info(f"Author:      {act_author}")
     log_info(f"Domain:      {act_domain}")
     log_info(f"Target:      {output_path}")
+
+    # Load credentials in advance (strictly in RAM if using Bitwarden or env vars)
+    key_bytes: bytes | None = None
+    cert_bytes: bytes | None = None
+    if not no_c2pa:
+        key_bytes, cert_bytes = load_or_create_credentials(
+            key_path=key_path,
+            cert_path=cert_path,
+            domain=act_domain,
+            bw_item=bw_item,
+        )
+
+    # Derive watermark permutation secret from key bytes if not explicitly provided
+    wm_secret = secret
+    if not wm_secret:
+        if key_bytes:
+            wm_secret = hashlib.sha256(key_bytes).hexdigest()
+        else:
+            wm_secret = get_default_secret()
 
     # Stage 2: Embed DWT-DCT Steganographic Watermark
     work_file = output_path
@@ -717,9 +1112,8 @@ def process_signing(
             shutil.copyfile(input_path, output_path)
 
     # Stage 1: C2PA Content Credentials
-    if not no_c2pa:
+    if not no_c2pa and key_bytes and cert_bytes:
         log_info("Stage 1: Signing with C2PA Content Credentials...")
-        key_bytes, cert_bytes = load_or_create_credentials(key_path, cert_path, act_domain)
 
         signer_info = c2pa.C2paSignerInfo(
             alg=c2pa.C2paSigningAlg.ES256,
@@ -747,7 +1141,7 @@ def process_signing(
                     "data": {
                         "actions": [
                             {
-                                "action": "c2pa.created",
+                                 "action": "c2pa.created",
                                 "digitalSourceType": src_type,
                                 "parameters": action_params,
                             }
@@ -767,7 +1161,8 @@ def process_signing(
             log_err(f"C2PA signing error: {e}")
             sys.exit(1)
     else:
-        log_info("Stage 1: C2PA manifest signing disabled (--no-c2pa).")
+        if no_c2pa:
+            log_info("Stage 1: C2PA manifest signing disabled (--no-c2pa).")
 
     # Stage 3: OpenTimestamps Blockchain Anchoring
     if stamp or cfg.get("auto_stamp", False):
@@ -784,6 +1179,7 @@ def inspect_image(
     as_json: bool = False,
     secret: str | None = None,
     ots_path: Path | None = None,
+    bw_item: str | None = None,
 ) -> None:
     """Verifies C2PA Content Credentials, DWT-DCT invisible watermarks, and OpenTimestamps."""
     if not image_path.is_file():
@@ -809,7 +1205,21 @@ def inspect_image(
 
     # 2. Verify DWT-DCT Invisible Watermark (Stage 2)
     cfg = load_config()
-    wm_secret = secret or get_default_secret()
+    wm_secret = secret
+    if not wm_secret:
+        env_creds = load_env_credentials()
+        if env_creds:
+            wm_secret = hashlib.sha256(env_creds[0]).hexdigest()
+    if not wm_secret:
+        target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
+        if target_bw:
+            try:
+                k_bytes, _ = fetch_bitwarden_credentials(target_bw)
+                wm_secret = hashlib.sha256(k_bytes).hexdigest()
+            except Exception:
+                pass
+    if not wm_secret:
+        wm_secret = get_default_secret()
     wm_repeats = int(cfg.get("watermark_repeats", 3))
     detected_wm: str | None = None
 
@@ -921,17 +1331,23 @@ def main() -> None:
         epilog="""
 Examples:
   sign-image sign image.png                       # Sign with C2PA and invisible watermark
+  sign-image sign --bw image.png                  # Sign using keys directly from Bitwarden into RAM (0 disk files)
+  sign-image sign --bw-item "my-key" image.png    # Use custom Bitwarden item
   sign-image sign --stamp image.png               # Sign with all 3 layers (C2PA + Watermark + OpenTimestamps)
   sign-image sign -o signed.jpg raw.jpg           # Sign and write to custom destination
   sign-image sign --in-place banner.webp          # Embed signatures directly into file
   sign-image sign --no-watermark photo.jpg        # C2PA manifest only
   sign-image sign --no-c2pa photo.jpg             # Invisible watermark only
   sign-image verify image_signed.png              # Inspect all 3 attestation layers
+  sign-image verify --bw image_signed.png         # Verify watermark using secret key in Bitwarden
   sign-image verify --json image_signed.png       # Print complete raw verification report in JSON
   sign-image stamp photo.png                      # Anchor existing image into Bitcoin blockchain
   sign-image stamp --upgrade photo.png.ots        # Upgrade pending timestamp to confirmed Bitcoin block
   sign-image credentials                          # View active certificate details and paths
+  sign-image credentials --bw                     # View credentials stored in Bitwarden
+  sign-image credentials --bw-push c2pa-signer    # Push local credentials directly into Bitwarden vault
   sign-image credentials --export                 # Export key and cert for Bitwarden backup
+  sign-image keygen --bw                          # Generate keys directly in Bitwarden (0 disk files)
   sign-image keygen                               # Regenerate dedicated signing certificates
         """,
     )
@@ -955,31 +1371,40 @@ Examples:
     p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
+    p_sign.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch C2PA credentials strictly from Bitwarden into RAM (zero local disk storage)")
 
     # Command: verify / inspect
     p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA, watermarks & OpenTimestamps")
     p_verify.add_argument("file", type=Path, help="Target media file to inspect")
     p_verify.add_argument("--ots", type=Path, help="Path to custom or detached .ots proof file")
     p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
+    p_verify.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch watermark secret from Bitwarden into RAM for verification")
     p_verify.add_argument("--json", action="store_true", help="Output raw verification report in JSON")
 
-    # Command: stamp (standalone OpenTimestamps anchoring and upgrading)
-    p_stamp = subparsers.add_parser("stamp", help="Anchor or upgrade media files in Bitcoin blockchain (OpenTimestamps)")
-    p_stamp.add_argument("file", type=Path, help="Target media file or .ots proof file")
-    p_stamp.add_argument("--upgrade", action="store_true", help="Upgrade pending .ots proof against Bitcoin calendars")
+    # Command: stamp (standalone OpenTimestamps anchoring, upgrading, and scheduling)
+    p_stamp = subparsers.add_parser("stamp", help="Anchor, upgrade, or schedule timers in Bitcoin blockchain (OpenTimestamps)")
+    p_stamp.add_argument("file", type=Path, nargs="?", default=None, help="Target media file, directory, or .ots proof file")
+    p_stamp.add_argument("--upgrade", action="store_true", help="Upgrade pending .ots proof against Bitcoin calendars (file or directory)")
     p_stamp.add_argument("--wait", action="store_true", help="Wait until confirmation block is available")
     p_stamp.add_argument("-f", "--force", action="store_true", help="Overwrite existing .ots file")
+    p_stamp.add_argument("--setup-timer", nargs="?", const="DEFAULT", type=Path, help="Install and enable systemd user timer to periodically upgrade .ots files in a directory")
+    p_stamp.add_argument("--remove-timer", action="store_true", help="Disable and remove the systemd user timer for .ots upgrades")
+    p_stamp.add_argument("--timer-status", action="store_true", help="Check status of systemd user timer for .ots upgrades")
+    p_stamp.add_argument("--timer-interval", type=str, default="2h", help="Interval for systemd timer (default: 2h)")
 
-    # Command: credentials (view, export, import)
-    p_cred = subparsers.add_parser("credentials", help="View, export, or import signing credentials (Bitwarden backup)")
+    # Command: credentials (view, export, import, bitwarden)
+    p_cred = subparsers.add_parser("credentials", help="View, export, import, or push signing credentials (Bitwarden vault)")
     p_cred.add_argument("--export", action="store_true", help="Print raw PEM key and cert to stdout for Bitwarden")
     p_cred.add_argument("--import-key", type=Path, help="Import private key PEM file into ~/.config/nadamu/c2pa/")
     p_cred.add_argument("--import-cert", type=Path, help="Import certificate chain PEM file into ~/.config/nadamu/c2pa/")
+    p_cred.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Inspect or export credentials stored in Bitwarden vault")
+    p_cred.add_argument("--bw-push", type=str, help="Push local credentials directly into Bitwarden vault as Secure Note")
 
     # Command: keygen
     p_keygen = subparsers.add_parser("keygen", help="Generate or regenerate C2PA signing credentials")
     p_keygen.add_argument("-d", "--domain", type=str, default=DEFAULT_DOMAIN, help="Domain for certificates")
     p_keygen.add_argument("--out-dir", type=Path, default=DEFAULT_KEY_DIR, help="Destination directory for keys")
+    p_keygen.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Store generated credentials directly in Bitwarden vault without writing to disk")
 
     # Handle shortcut: if first arg is a file or flag, default to 'sign' or 'verify'
     args_list = sys.argv[1:]
@@ -1001,24 +1426,43 @@ Examples:
             export_raw=args.export,
             import_key=args.import_key,
             import_cert=args.import_cert,
+            bw_item=args.bw_item,
+            bw_push=args.bw_push,
         )
 
     elif args.command == "keygen":
-        out_key = args.out_dir / "es256_private.key"
-        out_cert = args.out_dir / "es256_certs.pem"
-        log_head(f"Generating C2PA signing credentials for {args.domain}...")
-        generate_c2pa_credentials(args.domain, out_key, out_cert)
-        log_ok(f"Key written:  {out_key}")
-        log_ok(f"Cert written: {out_cert}")
+        if args.bw_item:
+            log_head(f"Generating C2PA signing credentials for {args.domain} (Bitwarden: {args.bw_item})...")
+            k_bytes, c_bytes = generate_c2pa_credentials(args.domain, key_out=None, cert_out=None)
+            save_credentials_to_bitwarden(args.bw_item, k_bytes, c_bytes, args.domain)
+        else:
+            out_key = args.out_dir / "es256_private.key"
+            out_cert = args.out_dir / "es256_certs.pem"
+            log_head(f"Generating C2PA signing credentials for {args.domain}...")
+            generate_c2pa_credentials(args.domain, out_key, out_cert)
+            log_ok(f"Key written:  {out_key}")
+            log_ok(f"Cert written: {out_cert}")
 
     elif args.command == "stamp":
-        if args.upgrade:
+        if args.setup_timer is not None:
+            setup_ots_timer(args.setup_timer, interval=args.timer_interval)
+        elif args.remove_timer:
+            remove_ots_timer()
+        elif args.timer_status:
+            show_ots_timer_status()
+        elif args.upgrade:
+            if not args.file:
+                log_err("Please specify a target file or directory: sign-image stamp --upgrade <path>")
+                sys.exit(1)
             upgrade_ots_file(args.file)
         else:
+            if not args.file:
+                log_err("Please specify a file to timestamp: sign-image stamp <file>")
+                sys.exit(1)
             stamp_media_file(args.file, wait=args.wait, force=args.force)
 
     elif args.command == "verify":
-        inspect_image(args.file, as_json=args.json, secret=args.secret, ots_path=args.ots)
+        inspect_image(args.file, as_json=args.json, secret=args.secret, ots_path=args.ots, bw_item=args.bw_item)
 
     elif args.command == "sign":
         if args.in_place:
@@ -1043,6 +1487,7 @@ Examples:
             secret=args.secret,
             key_path=args.key,
             cert_path=args.cert,
+            bw_item=args.bw_item,
         )
 
 

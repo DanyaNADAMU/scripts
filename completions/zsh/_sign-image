@@ -36,6 +36,8 @@ _sign_image() {
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark permutation]:passphrase:' \
                         '--key[Custom EC private key PEM]:key file:_files' \
                         '--cert[Custom X.509 certificate chain PEM]:cert file:_files' \
+                        '--bw[Fetch C2PA credentials from Bitwarden into RAM]::item name:' \
+                        '--bw-item[Fetch C2PA credentials from Bitwarden item into RAM]:item name:' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
                         '*:media file:_files -g "*.([pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[aA][vV][iI][fF]|[sS][vV][gG]|[tT][iI][fF][fF])"'
                     ;;
@@ -43,29 +45,40 @@ _sign_image() {
                     _arguments \
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark extraction]:passphrase:' \
                         '--ots[Explicit OpenTimestamps proof file]:ots file:_files -g "*.ots"' \
+                        '--bw[Fetch watermark secret from Bitwarden into RAM]::item name:' \
+                        '--bw-item[Fetch watermark secret from Bitwarden item into RAM]:item name:' \
                         '--json[Output raw verification report in JSON]' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
                         '*:target media:_files'
                     ;;
                 stamp)
                     _arguments \
-                        '--upgrade[Upgrade pending .ots proof against Bitcoin calendars]' \
+                        '--upgrade[Upgrade pending .ots proof against Bitcoin calendars (file or directory)]' \
                         '--wait[Wait until confirmation block is available]' \
                         '(-f --force)'{-f,--force}'[Overwrite existing .ots file]' \
+                        '--setup-timer[Install and enable systemd user timer for directory]::directory:_files -/' \
+                        '--remove-timer[Disable and remove systemd user timer]' \
+                        '--timer-status[Check status of systemd user timer]' \
+                        '--timer-interval[Interval for systemd timer (default: 2h)]:interval:' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
-                        '*:file to stamp:_files'
+                        '*:target path:_files'
                     ;;
                 credentials)
                     _arguments \
                         '--export[Export raw private key and certificate chain for Bitwarden backup]' \
                         '--import-key[Import private key PEM file]:key file:_files' \
                         '--import-cert[Import certificate chain PEM file]:cert file:_files' \
+                        '--bw[Inspect credentials stored in Bitwarden vault]::item name:' \
+                        '--bw-item[Inspect credentials stored in Bitwarden item]:item name:' \
+                        '--bw-push[Push local credentials into Bitwarden Secure Note]:item name:' \
                         '(-h --help)'{-h,--help}'[Display help message]'
                     ;;
                 keygen)
                     _arguments \
                         '(-d --domain)'{-d,--domain}'[Domain name for certificates]:domain:' \
                         '--out-dir[Destination directory for credentials]:directory:_files -/' \
+                        '--bw[Store generated credentials in Bitwarden vault (zero disk files)]::item name:' \
+                        '--bw-item[Store generated credentials in Bitwarden item (zero disk files)]:item name:' \
                         '(-h --help)'{-h,--help}'[Display help message]'
                     ;;
             esac

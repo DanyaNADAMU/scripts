@@ -5,25 +5,76 @@ Cryptographic media processing, attestation, and verification utilities for the 
 ## Utilities
 
 ### [`sign_image.py`](./sign_image.py) (`sign-image`)
-Signs digital images (PNG, JPEG, WebP, AVIF, SVG, TIFF) with **C2PA Content Credentials** (Level 1 attestation).
-Cryptographically embeds author declarations, policy links, and pixel hash signatures.
+Signs digital images (PNG, JPEG, WebP, AVIF, SVG, TIFF) with **C2PA Content Credentials**, invisible **DWT-DCT steganographic watermarks**, and anchors them in the Bitcoin blockchain via **OpenTimestamps** (`.ots`).
 
 #### Key Features:
-* **Tamper-Evident:** Validates pixel hash integrity; any altered pixel flags the asset as `Invalid`.
-* **Zero Config:** Automatically generates and persists compliant ECDSA P-256 (ES256) X.509 certificate chains in `~/.config/nada/c2pa/`.
+* **Multi-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark + OpenTimestamps proof.
+* **Zero-Disk Bitwarden Integration:** Load signing keys directly from Bitwarden vault into RAM (`--bw`) with 0 secret bytes written to disk.
+* **Automated OTS Upgrades:** Built-in systemd user timer automation (`--setup-timer`) and recursive directory upgrading.
 * **Universal Runner:** Runs seamlessly via `uv run` with PEP 723 inline dependency isolation.
 
 #### Usage:
 ```bash
-# Sign an image (creates <name>_signed.<ext>)
-sign-image sign banner.png
+# Sign an image (C2PA + Watermark + OpenTimestamps)
+sign-image sign -a "Danya <git@nada.mu>" --stamp logo.png
 
-# Sign with custom title, author, and in-place overwrite
-sign-image sign --in-place -t "Logo 2026" -a "Danya <git@nada.mu>" logo.png
+# Sign strictly in RAM using Bitwarden credentials
+sign-image sign --bw-item c2pa-signer --stamp logo.png
 
-# Verify and inspect provenance passport
-sign-image verify banner_signed.png
+# Verify provenance, watermark, and Bitcoin timestamp
+sign-image verify logo_signed.png
 
-# Export complete raw manifest in JSON
-sign-image verify --json banner_signed.png
+# Recursively upgrade pending .ots files in a directory
+sign-image stamp --upgrade ~/SeaDrive/"My Libraries"/Icons
+
+# Install automated systemd timer for periodic .ots upgrades
+sign-image stamp --setup-timer ~/SeaDrive/"My Libraries"/Icons --timer-interval 2h
+```
+
+---
+
+### [`build_image.py`](./build_image.py) (`build-image`)
+Structured media asset pipeline for icons, logos, and UI graphics across versioned releases.
+
+#### Standard Directory Hierarchy:
+```text
+<Icons-Library>/
+└── <asset_name>/
+    ├── v1/
+    │   ├── 01_source/
+    │   │   ├── raw/      # duck.xcf (0444 + .ots)
+    │   │   └── master/   # duck_crop_master.png (0444 + .ots)
+    │   ├── 02_signed/
+    │   │   └── duck_1024_signed.png (C2PA + Watermark + .ots)
+    │   └── 03_dist/
+    │       ├── favicon.ico          # Multi-layer 16..256 container
+    │       ├── duck_512.webp / .png # Clean, zero overhead
+    │       ├── duck_256.webp / .png
+    │       └── ... (128, 64, 32)
+    └── latest -> v1/
+```
+
+#### Key Features:
+* **Source Protection:** Immutable original canvas and master files locked with `chmod 0444` and anchored in Bitcoin.
+* **Showcase Attestation:** 1024x1024 release signed cryptographically via C2PA, watermark, and OTS.
+* **Clean Distribution:** Multi-scale WebP/PNG downscales and multi-layer ICO without metadata bloating.
+* **Non-Blocking Audit:** Full diagnostic pass (`build-image audit`) reporting all hash mismatches, missing proofs, and orphaned files at once.
+* **Atomic Versioning:** Manages `latest` symlink and version upgrades without cross-version contamination.
+
+#### Usage:
+```bash
+# Build a new icon version from master and raw canvas
+build-image build duck v1 --master duck_crop.png --raw duck.xcf
+
+# Build with Bitwarden in-memory signing
+build-image build duck v2 --master duck_crop.png --bw-item c2pa-signer
+
+# Run full non-blocking integrity audit across all assets
+build-image audit
+
+# Recursively upgrade OTS proofs for a specific asset version
+build-image upgrade duck v1
+
+# List managed assets and versions
+build-image list
 ```

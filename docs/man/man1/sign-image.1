@@ -23,12 +23,18 @@ Inspects and verifies all 3 layers: C2PA Content Credentials, invisible frequenc
 .B stamp \fR[\fB\-\-upgrade\fR] [\fB\-\-wait\fR] [\fB\-f\fR|\fB\-\-force\fR] \fIfile\fR
 Anchors a media file into the Bitcoin blockchain via OpenTimestamps (\fI<file>.ots\fR), or upgrades a pending \fI.ots\fR proof file once the Bitcoin block has been mined.
 .TP
-.B credentials \fR[\fB\-\-export\fR|\fB\-\-import-key\fR \fIkey\fR \fB\-\-import-cert\fR \fIcert\fR]
-Views, exports, or imports C2PA signing credentials (private key and X.509 certificate chain). Useful for Bitwarden backups and replicating signing setups across machines.
+.B credentials \fR[\fB\-\-export\fR|\fB\-\-import\-key\fR \fIkey\fR \fB\-\-import\-cert\fR \fIcert\fR|\fB\-\-bw\fR [\fIitem\fR]|\fB\-\-bw\-push\fR \fIitem\fR]
+Views, exports, imports, or manages C2PA signing credentials. Supports inspecting in-memory credentials from Bitwarden (\fB\-\-bw\fR) or pushing local credentials to a Bitwarden Secure Note (\fB\-\-bw\-push\fR) to achieve zero local disk storage.
 .TP
-.B keygen \fR[\fB\-d\fR \fIdomain\fR] [\fB\-\-out-dir\fR \fIdir\fR]
-Generates or regenerates an ECDSA P-256 (ES256) private key and a C2PA-compliant 2-tier X.509 certificate chain (Root CA + Leaf).
+.B keygen \fR[\fB\-d\fR \fIdomain\fR] [\fB\-\-bw\fR [\fIitem\fR]] [\fB\-\-out-dir\fR \fIdir\fR]
+Generates an ECDSA P-256 (ES256) private key and a C2PA-compliant 2-tier X.509 certificate chain (Root CA + Leaf). When used with \fB\-\-bw\fR, credentials are saved directly to Bitwarden without writing any files to local disk.
 .SH OPTIONS
+.TP
+.BR \-\-bw ", " \-\-bw\-item " [" \fIitem\fR ]
+Fetches or stores C2PA credentials strictly in-memory from Bitwarden vault (defaults to \fBc2pa\-signer\fR or the item configured in \fBc2pa.json\fR). No keys are ever written to disk. Requires active \fBBW_SESSION\fR.
+.TP
+.BI \-\-bw\-push " item"
+Pushes current local credentials into a new or existing Bitwarden Secure Note item, allowing subsequent deletion of local disk keys.
 .TP
 .BR \-o ", " \-\-output " " \fIpath\fR
 Destination path for the signed image (default: \fI<name>_signed.<ext>\fR).
@@ -70,7 +76,19 @@ Secret passphrase for pseudorandom watermark block scrambling and extraction (de
 Path to an explicit OpenTimestamps proof file for verification.
 .TP
 .B \-\-upgrade
-Upgrades a pending OpenTimestamps proof file by querying remote calendar servers.
+Upgrades a pending OpenTimestamps proof file or recursively upgrades all \fI.ots\fR files in a directory by querying remote calendar servers.
+.TP
+.BR \-\-setup\-timer " [" \fIdir\fR ]
+Installs and enables a systemd user timer (\fBsign\-image\-ots.timer\fR) that periodically and automatically upgrades all \fI.ots\fR files in the specified directory (defaults to \fI~/SeaDrive/My Libraries/Icons\fR).
+.TP
+.B \-\-remove\-timer
+Disables and removes the systemd user timer for automatic \fI.ots\fR upgrades.
+.TP
+.B \-\-timer\-status
+Displays the active status and next scheduled run of the systemd user timer.
+.TP
+.BI \-\-timer\-interval " interval"
+Interval for the systemd timer execution (default: \fB2h\fR).
 .TP
 .B \-\-wait
 Wait synchronously until a Bitcoin block confirmation is available.
@@ -89,16 +107,29 @@ Outputs raw verification report or C2PA manifest in JSON format.
 .TP
 .B \-\-export
 Prints the raw private key and certificate chain in PEM format for Bitwarden vault backup.
+.SH ENVIRONMENT
+.TP
+.B BW_SESSION
+Active Bitwarden vault unlock session key required for \fB\-\-bw\fR.
+.TP
+.B C2PA_BW_ITEM
+Default Bitwarden vault item name to retrieve credentials from.
+.TP
+.B C2PA_PRIVATE_KEY
+PEM-encoded EC private key to use strictly in-memory (overrides disk files).
+.TP
+.B C2PA_CERT
+PEM-encoded X.509 certificate chain to use strictly in-memory.
 .SH FILES
 .TP
 .I ~/.config/nadamu/c2pa/es256_private.key
-Default ECDSA P-256 private key (permissions 0600).
+Default ECDSA P-256 private key (permissions 0600, optional when using Bitwarden).
 .TP
 .I ~/.config/nadamu/c2pa/es256_certs.pem
 Default 2-tier X.509 certificate chain (End-entity + Root CA).
 .TP
 .I ~/.config/nadamu/c2pa.json
-Configuration file for default author, domain, policy URL, license, watermark parameters, and auto_stamp.
+Configuration file for default author, domain, policy URL, license, watermark parameters, auto_stamp, and optional bitwarden_item.
 .SH AUTHORS
 Maintained by DanyaNADAMU <git@nada.mu>.
 .SH SEE ALSO

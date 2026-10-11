@@ -1,0 +1,60 @@
+# Bash completion for build-image
+_build_image_completions() {
+    local cur prev commands cmd icons_dir
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="build audit upgrade list -h --help"
+
+    icons_dir="${SEADRIVE_ICONS:-$HOME/SeaDrive/My Libraries/Icons}"
+    [ ! -d "$icons_dir" ] && icons_dir="$HOME/.local/share/icons-archive"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    cmd="${COMP_WORDS[1]}"
+
+    case "$prev" in
+        -m|--master|-r|--raw)
+            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|xcf|psd|ai|tiff)" -- "$cur") )
+            return 0
+            ;;
+        -d|--dir)
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+            ;;
+        --sizes|--bw-item)
+            return 0
+            ;;
+    esac
+
+    case "$cmd" in
+        build)
+            local opts="-m --master -r --raw -d --dir --sizes --bw --bw-item --no-sign --no-stamp --force-re-stamp -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        audit|upgrade)
+            local opts="-d --dir -h --help"
+            if [ -d "$icons_dir" ]; then
+                local assets
+                assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"
+                COMPREPLY=( $(compgen -W "$opts $assets" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            fi
+            return 0
+            ;;
+        list)
+            local opts="-d --dir -h --help"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        *)
+            COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+            return 0
+            ;;
+    esac
+}
+complete -F _build_image_completions build-image
