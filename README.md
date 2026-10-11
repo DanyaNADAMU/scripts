@@ -44,23 +44,24 @@ scripts/
 ## Quick Start & Installation
 
 ### Option 1: Standalone Install via `curl | bash` (No git clone needed)
-Ideal for fresh servers or remote workstations:
+Ideal for fresh servers or remote workstations. Installs all utilities automatically without interactive prompts:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | bash
 ```
 
-The interactive wizard will prompt you:
-1. **Scope:** User (`~/.local/bin`, no sudo) or System (`/usr/local/bin`, requires sudo).
-2. **Category:** `all`, `server`, `desktop`, or `media`.
+**Zero-Prompt Defaults:**
+* **Scope:** Automatically targets user space (`~/.local/bin`, no sudo required). If executed by `root`, automatically targets system space (`/usr/local/bin`).
+* **Category:** Synchronizes `all` declared utilities.
+* **Displays:** Prints a clean summary table of installed utilities, categories, and descriptions.
 
-#### Unattended / Non-Interactive Install:
+#### Customizing Installation:
 ```bash
-# Install server utilities to ~/.local/bin without prompts
-curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | bash -s -- --scope user --category server -y
+# Install server utilities only to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | bash -s -- --category server
 
-# System-wide installation
-curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | sudo bash -s -- --scope system -y
+# Force system-wide installation
+curl -fsSL https://raw.githubusercontent.com/DanyaNADAMU/scripts/main/install.sh | sudo bash -s -- --scope system
 ```
 
 ---
@@ -74,7 +75,7 @@ git clone https://github.com/DanyaNADAMU/scripts.git ~/projects/scripts
 cd ~/projects/scripts
 
 # 2. Link utilities into ~/.local/bin (symlinks allow live edits)
-./scripts install --scope user -y
+./scripts sync
 ```
 
 Ensure `~/.local/bin` is in your `$PATH` (in `~/.zshrc` or `~/.bashrc`):
@@ -89,16 +90,15 @@ export PATH="$HOME/.local/bin:$PATH"
 Once installed, the `scripts` manager is available anywhere in your terminal:
 
 ```bash
+scripts sync                 # Synchronize & update all utilities (aliases: update, install)
 scripts list                 # View all declared utilities and installation status
-scripts update               # Pull upstream updates and sync files with SHA-256 report
 scripts uninstall            # Cleanly remove all utilities, man pages, and completions
 scripts --help               # View command options and help
 ```
 
-### Transparent Updates & Orphan Handling
-When running `scripts update`:
-* It verifies SHA-256 checksums and reports exactly what changed (`[+] Added`, `[↑] Updated`, `[=] Up to date`).
-* If a script was previously installed but was deleted from the upstream repository, `scripts update` warns you and prompts whether you want to clean it up.
+### Transparent Synchronization & Scope Protection
+* **Unified Operation:** `scripts sync`, `scripts update`, and `scripts install` are complete synonyms. They verify SHA-256 digests, pull upstream changes (when inside a git clone), update binaries, and clean up deprecated utilities.
+* **Scope Protection:** If you run `scripts sync` and an existing installation is detected with mismatched privileges, `scripts` safely prompts you to choose the desired action rather than creating accidental duplicates.
 
 ---
 

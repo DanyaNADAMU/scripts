@@ -16,14 +16,14 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")
 
 ARGS=()
 if [ $# -eq 0 ]; then
-    ARGS=("install")
+    ARGS=("sync")
 else
     case "$1" in
-        install|update|list|uninstall|help|-h|--help)
+        sync|update|install|list|uninstall|help|-h|--help)
             ARGS=("$@")
             ;;
         *)
-            ARGS=("install" "$@")
+            ARGS=("sync" "$@")
             ;;
     esac
 fi

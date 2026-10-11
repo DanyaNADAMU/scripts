@@ -3,8 +3,9 @@
 _scripts() {
     local -a commands
     commands=(
-        'install:Install scripts and utilities into user or system path'
-        'update:Sync and update installed scripts from repository'
+        'sync:Synchronize utilities with repository (aliases: update, install)'
+        'update:Synchronize utilities with repository (alias for sync)'
+        'install:Synchronize utilities with repository (alias for sync)'
         'list:List all declared and installed scripts'
         'uninstall:Remove installed scripts, man pages, and completions'
         'help:Show help information'
@@ -20,10 +21,11 @@ _scripts() {
             ;;
         args)
             case $words[1] in
-                install|update)
+                sync|update|install)
                     _arguments \
                         '--scope[Target installation directory]:scope:(user system)' \
                         '--category[Filter by script category]:category:(all server desktop media)' \
+                        '--method[Installation method]:method:(link copy)' \
                         '(-y --yes)'{-y,--yes}'[Run non-interactively, accepting all defaults]' \
                         '(-h --help)'{-h,--help}'[Display help message]'
                     ;;
