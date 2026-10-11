@@ -5,6 +5,8 @@ _scripts() {
     commands=(
         'update:Sync and update installed utilities from repository'
         'list:List all declared and installed scripts'
+        'prune:Find and remove deprecated or orphaned utilities'
+        'clean:Alias for prune'
         'autoupdate:Manage automated updates via package manager hooks'
         'uninstall:Remove installed scripts, man pages, and completions'
         'help:Show help information'
@@ -33,11 +35,18 @@ _scripts() {
                         '1:action:(status enable disable)' \
                         '2:target:(apt)'
                     ;;
-                uninstall)
+                prune|clean)
                     _arguments \
                         '--scope[Target directory scope]:scope:(user system)' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation prompt]' \
                         '(-h --help)'{-h,--help}'[Display help message]'
+                    ;;
+                uninstall)
+                    _arguments \
+                        '--scope[Target directory scope]:scope:(user system)' \
+                        '(-y --yes)'{-y,--yes}'[Skip confirmation prompt]' \
+                        '(-h --help)'{-h,--help}'[Display help message]' \
+                        '*:utility:(sign-image build-image media backup-seafile backup-seadrive setup-user)'
                     ;;
                 list)
                     _arguments \

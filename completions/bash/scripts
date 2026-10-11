@@ -3,7 +3,7 @@ _scripts_completions() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="update list autoupdate uninstall help"
+    commands="update list prune clean autoupdate uninstall help"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -29,6 +29,14 @@ _scripts_completions() {
             ;;
         --method)
             COMPREPLY=( $(compgen -W "link copy" -- "$cur") )
+            return 0
+            ;;
+        uninstall)
+            COMPREPLY=( $(compgen -W "sign-image build-image media backup-seafile backup-seadrive setup-user --scope --yes --help" -- "$cur") )
+            return 0
+            ;;
+        prune|clean)
+            COMPREPLY=( $(compgen -W "--scope --yes --help" -- "$cur") )
             return 0
             ;;
         *)
