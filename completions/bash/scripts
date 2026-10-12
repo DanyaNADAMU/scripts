@@ -32,7 +32,7 @@ _scripts_completions() {
             return 0
             ;;
         uninstall)
-            COMPREPLY=( $(compgen -W "media backup-seafile backup-seadrive setup-user --scope --yes --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "media backup-seafile backup-seadrive keylight setup-user --scope --yes --help" -- "$cur") )
             return 0
             ;;
         prune|clean)

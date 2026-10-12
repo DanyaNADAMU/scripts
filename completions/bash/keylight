@@ -1,0 +1,9 @@
+# Bash completion for keylight
+_keylight_completions() {
+    local cur
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "-h --help -l --list -c --current -n --next off night cyan white" -- "$cur") )
+    fi
+}
+complete -F _keylight_completions keylight

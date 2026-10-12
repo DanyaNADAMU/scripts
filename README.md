@@ -21,7 +21,7 @@ scripts/
 │
 ├── docs/                    # Documentation & man pages
 │   ├── STANDARDS.md         # Engineering & documentation standards
-│   └── man/man1/            # Troff Linux man pages (media.1, setup-user.1, scripts.1)
+│   └── man/man1/            # Troff Linux man pages (media.1, setup-user.1, keylight.1, scripts.1)
 │
 ├── completions/             # Shell tab-completions
 │   ├── bash/                # Bash completions
@@ -32,7 +32,8 @@ scripts/
 │   └── backup_seafile.sh    # Resilient encrypted Seafile to Google Drive backup
 │
 ├── desktop/                 # Workstation & desktop environment scripts
-│   └── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
+│   ├── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
+│   └── keylight.sh          # Cyclic keyboard RGB backlight profile switcher
 │
 └── media/                   # Cryptographic media & attestation tools
     └── media.py             # C2PA manifest signing, invisible watermarking & asset pipeline
@@ -134,5 +135,6 @@ Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are i
 | `setup-user` | `server/setup_user.sh` | **Server** | Provisions a new Linux user with Zsh, SSH keys, lingering, and rootless Podman. | Bash, `systemd`, `podman` |
 | `backup-seafile` | `server/backup_seafile.sh` | **Server** | Automated encrypted incremental backup from Seafile (WebDAV/FUSE) to Google Drive. | Bash, `rclone`, `systemd` |
 | `backup-seadrive` | `desktop/backup_seadrive.sh` | **Desktop** | Automated encrypted incremental backup from SeaDrive to Google Drive via Rclone. | Bash, `rclone`, `systemd` |
+| `keylight` | `desktop/keylight.sh` | **Desktop** | Cyclic keyboard RGB backlight profile switcher for OpenRGB (MSI Mystic Light). | Bash, `openrgb` |
 | `media` | `media/media.py` | **Media** | Unified media lifecycle: C2PA attestation, DWT steganography, Bitcoin timestamps & asset packaging. | Python $\ge$ 3.11, `uv` |
 

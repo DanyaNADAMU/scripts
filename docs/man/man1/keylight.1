@@ -1,0 +1,79 @@
+.TH KEYLIGHT 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+keylight \- cyclic keyboard RGB backlight profile switcher using OpenRGB
+.SH SYNOPSIS
+.B keylight
+[\fB\-h\fR|\fB\-\-help\fR]
+[\fB\-l\fR|\fB\-\-list\fR]
+[\fB\-c\fR|\fB\-\-current\fR]
+[\fB\-n\fR|\fB\-\-next\fR]
+[\fIprofile\fR]
+.SH DESCRIPTION
+\fBkeylight\fR is an automation utility designed for Linux workstations to manage and cycle keyboard RGB backlight profiles via \fBOpenRGB\fR.
+.PP
+When invoked without arguments, \fBkeylight\fR sequentially cycles through declared illumination presets (\fBoff\fR \(-> \fBnight\fR \(-> \fBcyan\fR \(-> \fBwhite\fR).
+A specific profile can also be activated directly by passing its name as an argument.
+.PP
+Active state is tracked locally in the user cache directory (\fB$XDG_CACHE_HOME/keylight-current-profile\fR), allowing reliable cyclic switching across multiple executions.
+.SH HARDWARE CONTEXT & ARCHITECTURE
+\fBkeylight\fR specifically resolves complex hardware limitations encountered on \fBMSI MS-1565\fR (Mystic Light) laptop keyboard controllers:
+.TP
+.B 1. Write-Only Controller (No Hardware Readback)
+The MS-1565 embedded controller does not report its current color or mode back to the operating system. OpenRGB processes are transient CLI invocations that reinitialize hardware models on launch. Consequently, commands like \fBopenrgb \-\-save\-profile\fR record default uninitialized states (\fBOff\fR / zero colors), producing broken profile files.
+.TP
+.B 2. Multi-Zone Implementation Quirks
+In the MS-1565 Linux driver, the keyboard's 4 physical RGB zones are implemented as mutually exclusive \fImodes\fR (\fBStatic zone 1\fR through \fBStatic zone 4\fR) rather than OpenRGB \fIzones\fR. OpenRGB profile JSON files only store a single active mode per device, making 4-zone lighting impossible through static configuration files.
+.PP
+To overcome these limitations, \fBkeylight\fR issues direct, verified device mode commands sequentially to controller device \fB0\fR (\fB\-d 0\fR) and handles state tracking at the userland shell level.
+.SH PROFILES
+.TP
+.B off
+Completely turns off keyboard backlight illumination.
+.TP
+.B night
+Applies a gentle 4-zone emerald-to-olive forest gradient across the keyboard at 40% brightness:
+.RS
+.IP \(bu 2
+Zone 1: Emerald (\fB#006644\fR)
+.IP \(bu 2
+Zone 2: Mint/Olive (\fB#006626\fR)
+.IP \(bu 2
+Zone 3: Forest olive (\fB#1E6610\fR)
+.IP \(bu 2
+Zone 4: Olive amber (\fB#386608\fR)
+.RE
+.TP
+.B cyan
+Static vivid cyan illumination across all zones (\fB#00FFFF\fR at 40% brightness).
+.TP
+.B white
+Static clean, soft white backlight (\fB#FFFFFF\fR at 35% brightness).
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Displays usage instructions, available profiles, hardware notes, and exits.
+.TP
+.BR \-n ", " \-\-next
+Advances to the next profile in the cyclic sequence (default behavior when run without arguments).
+.TP
+.BR \-c ", " \-\-current
+Prints the name of the currently active profile.
+.TP
+.BR \-l ", " \-\-list
+Lists all available profiles with an indicator next to the active profile.
+.SH ENVIRONMENT
+.TP
+.B OPENRGB
+Path to the \fBopenrgb\fR binary. If unset, checks \fB$HOME/.local/bin/openrgb\fR, then searches \fB$PATH\fR.
+.TP
+.B XDG_CACHE_HOME
+Base cache directory for storing current profile state (default: \fB$HOME/.cache\fR).
+.SH FILES
+.TP
+.I ~/.cache/keylight-current-profile
+State file holding the name of the active lighting profile.
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR scripts (1),
+.BR openrgb (1)

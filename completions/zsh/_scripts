@@ -46,7 +46,7 @@ _scripts() {
                         '--scope[Target directory scope]:scope:(user system)' \
                         '(-y --yes)'{-y,--yes}'[Skip confirmation prompt]' \
                         '(-h --help)'{-h,--help}'[Display help message]' \
-                        '*:utility:(media backup-seafile backup-seadrive setup-user)'
+                        '*:utility:(media backup-seafile backup-seadrive keylight setup-user)'
                     ;;
                 list)
                     _arguments \

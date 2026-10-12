@@ -701,7 +701,7 @@ Usage: scripts uninstall [OPTIONS] [UTILITY...]
 Remove installed utilities, man pages, shell completions, and metadata.
 
 Arguments:
-  UTILITY...           Specific utility name(s) to uninstall (e.g. media, backup-seadrive).
+  UTILITY...           Specific utility name(s) to uninstall (e.g. media, backup-seadrive, keylight).
                        If omitted, prompts to uninstall all managed utilities.
 
 Options:
@@ -985,7 +985,7 @@ cmd_uninstall() {
         $cmd_prefix rm -rf "$STATE_DIR" "$BIN_DIR/scripts"
         uninstall_man_and_completions "scripts"
     else
-        for tool in "setup-user" "media" "backup-seafile" "backup-seadrive"; do
+        for tool in "setup-user" "media" "backup-seafile" "backup-seadrive" "keylight"; do
             $cmd_prefix rm -f "$BIN_DIR/$tool"
             uninstall_man_and_completions "$tool"
         done

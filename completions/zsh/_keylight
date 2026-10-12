@@ -1,0 +1,26 @@
+#compdef keylight
+
+_keylight() {
+    local -a profiles
+    profiles=(
+        'off:Turn off keyboard backlight'
+        'night:Emerald to olive 4-zone gradient'
+        'cyan:Static cyan backlight'
+        'white:Static white backlight'
+    )
+
+    _arguments \
+        '(-h --help)'{-h,--help}'[Display help message]' \
+        '(-l --list)'{-l,--list}'[List available profiles]' \
+        '(-c --current)'{-c,--current}'[Show currently active profile]' \
+        '(-n --next)'{-n,--next}'[Switch to next profile in sequence]' \
+        '1:profile:->profile' && return 0
+
+    case "$state" in
+        profile)
+            _describe 'profile' profiles
+            ;;
+    esac
+}
+
+_keylight "$@"
