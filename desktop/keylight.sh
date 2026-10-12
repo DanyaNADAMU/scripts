@@ -38,10 +38,11 @@ profile_off() {
 
 PROFILE_DESCS["night"]="Forest 4-zone gradient (emerald -> olive)"
 profile_night() {
-    "$OPENRGB" --loglevel error -d 0 -m "Static zone 1" -c 006644 -b 40 >/dev/null 2>&1 && \
-    "$OPENRGB" --loglevel error -d 0 -m "Static zone 2" -c 006626 -b 40 >/dev/null 2>&1 && \
-    "$OPENRGB" --loglevel error -d 0 -m "Static zone 3" -c 1E6610 -b 40 >/dev/null 2>&1 && \
-    "$OPENRGB" --loglevel error -d 0 -m "Static zone 4" -c 386608 -b 40 >/dev/null 2>&1
+    "$OPENRGB" --loglevel error -d 0 -m "Static zone 1" -c 006644 -b 40 >/dev/null 2>&1 &
+    "$OPENRGB" --loglevel error -d 0 -m "Static zone 2" -c 006626 -b 40 >/dev/null 2>&1 &
+    "$OPENRGB" --loglevel error -d 0 -m "Static zone 3" -c 1E6610 -b 40 >/dev/null 2>&1 &
+    "$OPENRGB" --loglevel error -d 0 -m "Static zone 4" -c 386608 -b 40 >/dev/null 2>&1 &
+    wait
 }
 
 PROFILE_DESCS["cyan"]="Static vivid cyan backlight (#00FFFF)"
