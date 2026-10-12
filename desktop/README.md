@@ -26,9 +26,11 @@ backup-seadrive --force
 ---
 
 ### `keylight`
-Cyclic keyboard RGB backlight profile switcher using OpenRGB. Specially tailored for MSI Mystic Light controllers (MS-1565).
+High-performance cyclic keyboard RGB backlight profile switcher using the OpenRGB SDK. Specially tailored for MSI Mystic Light controllers (MS-1565).
 
-* **Hardware Quirk Workaround:** MSI MS-1565 laptop controllers are write-only (no hardware readback) and expose the 4 keyboard zones as mutually exclusive driver *modes* (`Static zone 1` .. `Static zone 4`) instead of zones. Because OpenRGB `.json` profile files only store a single active mode per device, standard profile loading fails and blanks the keyboard. `keylight` issues direct mode commands to bypass this driver flaw.
+* **Direct Socket Acceleration (< 50ms):** Communicates directly with the OpenRGB background SDK server on `127.0.0.1:6742` over a raw TCP socket, bypassing CLI startup delays and switching lighting presets virtually instantaneously (~40ms for single presets, ~250ms for 4-zone gradients).
+* **Automatic CLI Fallback:** If the OpenRGB background daemon is stopped, `keylight` automatically falls back to executing the OpenRGB CLI.
+* **Hardware Quirk Workaround:** MSI MS-1565 laptop controllers are write-only (no hardware readback) and expose the 4 keyboard zones as mutually exclusive driver *modes* (`Static zone 1` .. `Static zone 4`) instead of zones. Because OpenRGB `.json` profile files only store a single active mode per device, standard profile loading fails and blanks the keyboard. `keylight` sequences raw mode packets to bypass this driver flaw.
 * **Stateful Cycling:** Maintains the active state in `${XDG_CACHE_HOME:-$HOME/.cache}/keylight-current-profile`, allowing rapid cycling across presets via a single hotkey.
 * **Presets:**
   * `off`: Complete backlight shutoff.

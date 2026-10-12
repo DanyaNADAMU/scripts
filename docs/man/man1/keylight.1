@@ -11,6 +11,8 @@ keylight \- cyclic keyboard RGB backlight profile switcher using OpenRGB
 .SH DESCRIPTION
 \fBkeylight\fR is an automation utility designed for Linux workstations to manage and cycle keyboard RGB backlight profiles via \fBOpenRGB\fR.
 .PP
+By default, \fBkeylight\fR communicates directly with the background \fBOpenRGB SDK server\fR (\fB127.0.0.1:6742\fR) via a raw TCP socket, switching profiles in under 50 milliseconds without starting the heavyweight CLI. If the server is not running, it automatically falls back to invoking the OpenRGB CLI.
+.PP
 When invoked without arguments, \fBkeylight\fR sequentially cycles through declared illumination presets (\fBoff\fR \(-> \fBnight\fR \(-> \fBcyan\fR \(-> \fBwhite\fR).
 A specific profile can also be activated directly by passing its name as an argument.
 .PP
@@ -24,7 +26,7 @@ The MS-1565 embedded controller does not report its current color or mode back t
 .B 2. Multi-Zone Implementation Quirks
 In the MS-1565 Linux driver, the keyboard's 4 physical RGB zones are implemented as mutually exclusive \fImodes\fR (\fBStatic zone 1\fR through \fBStatic zone 4\fR) rather than OpenRGB \fIzones\fR. OpenRGB profile JSON files only store a single active mode per device, making 4-zone lighting impossible through static configuration files.
 .PP
-To overcome these limitations, \fBkeylight\fR issues direct, verified device mode commands sequentially to controller device \fB0\fR (\fB\-d 0\fR) and handles state tracking at the userland shell level.
+To overcome these limitations, \fBkeylight\fR communicates directly with the controller via OpenRGB SDK network packets, pushing calibrated mode and color data with microsecond delays to prevent USB HID buffer saturation.
 .SH PROFILES
 .TP
 .B off
