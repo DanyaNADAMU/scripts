@@ -3,7 +3,10 @@ _keylight_completions() {
     local cur
     cur="${COMP_WORDS[COMP_CWORD]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "-h --help -l --list -c --current -n --next off night cyan white" -- "$cur") )
+        local profiles
+        profiles="$(keylight --complete-names 2>/dev/null || echo "off night cyan white")"
+        local options="-h --help -l --list -c --current -n --next"
+        COMPREPLY=( $(compgen -W "$options $profiles" -- "$cur") )
     fi
 }
 complete -F _keylight_completions keylight

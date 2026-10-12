@@ -2,12 +2,19 @@
 
 _keylight() {
     local -a profiles
-    profiles=(
-        'off:Turn off keyboard backlight'
-        'night:Emerald to olive 4-zone gradient'
-        'cyan:Static cyan backlight'
-        'white:Static white backlight'
-    )
+    local -a raw_profiles
+    raw_profiles=("${(@f)$(keylight --complete-zsh 2>/dev/null)}")
+
+    if (( ${#raw_profiles[@]} > 0 )); then
+        profiles=("${raw_profiles[@]}")
+    else
+        profiles=(
+            'off:Turn off all keyboard backlight'
+            'night:Forest 4-zone gradient (emerald -> olive)'
+            'cyan:Static vivid cyan backlight (#00FFFF)'
+            'white:Static clean soft white backlight (#FFFFFF)'
+        )
+    fi
 
     _arguments \
         '(-h --help)'{-h,--help}'[Display help message]' \
