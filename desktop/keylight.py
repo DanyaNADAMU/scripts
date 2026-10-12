@@ -185,7 +185,7 @@ def apply_profile(name: str):
     applied_via_socket = False
     try:
         from openrgb import OpenRGBClient
-        from openrgb.utils import PacketType, RGBColor
+        from openrgb.utils import ModeFlags, PacketType, RGBColor
 
         client = OpenRGBClient(protocol_version=3)
         if client.devices:
@@ -199,6 +199,20 @@ def apply_profile(name: str):
                         m.colors = [RGBColor.fromHEX(step["color"])]
                     if "brightness" in step and step["brightness"] is not None:
                         m.brightness = step["brightness"]
+
+                    # Sanitize attributes so mode.validate() doesn't fail on modes without color/brightness (e.g. 'Off')
+                    if ModeFlags.HAS_MODE_SPECIFIC_COLOR not in m.flags:
+                        m.colors = None
+                        m.colors_min = None
+                        m.colors_max = None
+                    if ModeFlags.HAS_SPEED not in m.flags:
+                        m.speed = None
+                        m.speed_min = None
+                        m.speed_max = None
+                    if ModeFlags.HAS_BRIGHTNESS not in m.flags:
+                        m.brightness = None
+                        m.brightness_min = None
+                        m.brightness_max = None
 
                     data = m.pack(client.comms._protocol_version)
                     client.comms.send_header(dev.id, PacketType.RGBCONTROLLER_UPDATEMODE, len(data))
