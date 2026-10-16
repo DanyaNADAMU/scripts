@@ -981,8 +981,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
 
-        raw_user = self.headers.get("X-authentik-username")
+        raw_user = (
+            self.headers.get("X-authentik-username")
+            or self.headers.get("Remote-User")
+            or self.headers.get("X-Forwarded-User")
+        )
         if not raw_user:
+            logger.warning(
+                "Unauthorized access attempt to %s: missing auth headers (X-authentik-username / Remote-User). Received headers: %s",
+                self.path,
+                list(self.headers.keys()),
+            )
             self.send_response(HTTPStatus.UNAUTHORIZED)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             msg = b"401 Unauthorized: Direct access forbidden. Please access this service via Authentik Forward Auth (HAProxy).\n"
@@ -1026,8 +1035,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
 
-        raw_user = self.headers.get("X-authentik-username")
+        raw_user = (
+            self.headers.get("X-authentik-username")
+            or self.headers.get("Remote-User")
+            or self.headers.get("X-Forwarded-User")
+        )
         if not raw_user:
+            logger.warning(
+                "Unauthorized POST attempt to %s: missing auth headers. Received headers: %s",
+                self.path,
+                list(self.headers.keys()),
+            )
             self.send_response(HTTPStatus.UNAUTHORIZED)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             msg = b"401 Unauthorized: Direct access forbidden. Please access this service via Authentik Forward Auth (HAProxy).\n"
