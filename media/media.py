@@ -254,6 +254,7 @@ def embed_dwt_watermark(
     """Embeds an invisible, robust DWT-DCT watermark into the luminance channel."""
     has_alpha = img.mode == "RGBA"
     alpha = img.getchannel("A") if has_alpha else None
+    orig_w, orig_h = img.size
     rgb_img = img.convert("RGB")
 
     ycbcr = rgb_img.convert("YCbCr")
@@ -301,6 +302,7 @@ def embed_dwt_watermark(
         LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8] = _idct2(d)
 
     y_wm = pywt.idwt2((LL, (LH, HL, HH)), "haar")
+    y_wm = y_wm[:orig_h, :orig_w]
     y_wm = np.clip(y_wm, 0, 255).astype(np.uint8)
 
     res_img = Image.merge("YCbCr", (Image.fromarray(y_wm), Cb, Cr)).convert("RGB")
@@ -1543,7 +1545,13 @@ def process_signing(
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 save_fmt = pil_img.format or "PNG"
-                wm_img.save(output_path, format=save_fmt)
+                save_kwargs: dict[str, Any] = {}
+                if output_path.suffix.lower() in (".jpg", ".jpeg"):
+                    save_fmt = "JPEG"
+                    save_kwargs = {"quality": 95}
+                    if wm_img.mode in ("RGBA", "LA", "P"):
+                        wm_img = wm_img.convert("RGB")
+                wm_img.save(output_path, format=save_fmt, **save_kwargs)
                 log_ok("Stage 1 complete: Watermark embedded into frequency spectrum.")
         except Exception as e:
             log_err(f"Steganographic watermarking failed: {e}")
@@ -2436,6 +2444,24 @@ def execute_build(
                 master_path = img_cands[0]
                 log_info(f"Auto-detected master image in to_sign/: {master_path.name}")
 
+    # Auto-organize project canvas files (.xcf, .psd, .kra, .blend, .ai) into raw/
+    raw_dest_dir.mkdir(parents=True, exist_ok=True)
+    for search_dir in (to_gen_dir, to_sign_dir):
+        if search_dir.is_dir():
+            for f in sorted(search_dir.iterdir()):
+                if (
+                    f.is_file()
+                    and not f.name.startswith(".")
+                    and f.suffix.lower() in (".xcf", ".psd", ".kra", ".blend", ".ai")
+                ):
+                    target_canvas = raw_dest_dir / f.name
+                    if target_canvas.resolve() != f.resolve():
+                        log_info(f"Organizing project canvas '{f.name}' -> {raw_dest_dir.name}/")
+                        shutil.move(f, target_canvas)
+                        ots_f = f.with_name(f"{f.name}.ots")
+                        if ots_f.is_file():
+                            shutil.move(ots_f, raw_dest_dir / ots_f.name)
+
     # Auto-detect existing raw project canvas if not provided
     if raw_path is None:
         if raw_dest_dir.is_dir():
@@ -2707,6 +2733,23 @@ def execute_build(
 
     for src_file, dst_file, desc in items_to_sign:
         is_tmp = src_file.name.startswith(".tmp_")
+
+        # Skip already-signed and anchored releases if up to date and not forced
+        if dst_file.is_file() and not force:
+            local_ots = dst_file.with_name(f"{dst_file.name}.ots")
+            remote_ots = (
+                (target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots")
+                if target_proofs_dir
+                else local_ots
+            )
+            if (remote_ots.is_file() or no_stamp) and (
+                is_tmp or src_file.stat().st_mtime <= dst_file.stat().st_mtime
+            ):
+                log_ok(f"Signed release already up to date: {dst_file.name} (use --force to re-sign)")
+                if is_tmp:
+                    src_file.unlink(missing_ok=True)
+                continue
+
         if not no_sign:
             log_info(f"Cryptographically signing {desc} -> {dst_file.name}...")
             process_signing(
