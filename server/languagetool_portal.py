@@ -1168,7 +1168,8 @@ def setup_systemd_service(
 
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.service"], check=True)
-        print(f"✓ Enabled and started user service '{SERVICE_NAME}'.")
+        subprocess.run(["systemctl", "--user", "restart", f"{SERVICE_NAME}.service"], check=True)
+        print(f"✓ Enabled and restarted user service '{SERVICE_NAME}'.")
         print(f"  Check status: systemctl --user status {SERVICE_NAME}")
     else:
         if os.geteuid() != 0:
@@ -1185,7 +1186,8 @@ def setup_systemd_service(
 
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "enable", "--now", f"{SERVICE_NAME}.service"], check=True)
-        print(f"✓ Enabled and started system service '{SERVICE_NAME}'.")
+        subprocess.run(["systemctl", "restart", f"{SERVICE_NAME}.service"], check=True)
+        print(f"✓ Enabled and restarted system service '{SERVICE_NAME}'.")
         print(f"  Check status: systemctl status {SERVICE_NAME}")
 
 
