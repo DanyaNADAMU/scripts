@@ -92,10 +92,10 @@ It integrates three independent cryptographic layers into a unified workflow:
 .SS Asset Pipeline
 .TP
 .B init \fIname\fR \fIversion\fR
-Initializes the standardized directory hierarchy (\fB01_source/raw/\fR, \fB01_source/master/\fR, \fB02_signed/\fR, \fB03_dist/\fR, and the corresponding proofs directory) for a new asset version tag without building files.
+Initializes the standardized directory hierarchy (\fBsource/raw/\fR, \fBsource/master/\fR, \fBsigned/\fR, \fBdist/\fR, and the corresponding proofs directory) and generates a default \fBmanifest.json\fR for a new asset version tag without building files.
 .TP
 .B build \fIname\fR \fIversion\fR
-Constructs a complete versioned release from source materials. Automatically discovers existing master and raw files if already placed in \fB01_source/\fR, or scaffolds the structure if empty. Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, and multi-layer \fBfavicon.ico\fR), and updates the atomic \fBlatest\fR symlink.
+Constructs a complete versioned release from source materials. Automatically discovers existing master and raw files in \fBsource/\fR, auto-detects aspect ratio (1:1, 16:9, 4:3, etc.) or reads target resolutions from \fBmanifest.json\fR. Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, and multi-layer \fBfavicon.ico\fR), and updates the atomic \fBlatest\fR symlink.
 .TP
 .B audit [\fIname\fR] [\fIversion\fR]
 Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
@@ -146,10 +146,10 @@ Configures the default signing source. Pass \fBagent\fR or \fBssh\-agent\fR to u
 .SH OPTIONS
 .TP
 .BI \-m ", " \-\-master " file"
-Path to normalized square master image (PNG, WebP). Auto-detected if present in \fB01_source/master/\fR.
+Path to normalized master image (PNG, WebP). Auto-detected if present in \fBsource/master/\fR.
 .TP
 .BI \-r ", " \-\-raw " file"
-Path to original project canvas (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR). Auto-detected if present in \fB01_source/raw/\fR.
+Path to original project canvas (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR). Auto-detected if present in \fBsource/raw/\fR.
 .TP
 .BI \-d ", " \-\-dir " path"
 Base directory for the managed icons library (default: current directory if named \fIIcons\fR, \fB$SEAFILE_ICONS\fR, \fI~/Seafile/Icons\fR, \fB$SEADRIVE_ICONS\fR, or \fI~/SeaDrive/My Libraries/Icons\fR).
@@ -158,7 +158,7 @@ Base directory for the managed icons library (default: current directory if name
 Base directory for the separated OpenTimestamps proofs archive (default: sibling \fI<icons>-Proofs\fR, \fB$SEAFILE_PROOFS\fR, \fI~/Seafile/Icons\-Proofs\fR, \fB$SEADRIVE_PROOFS\fR, or \fI~/SeaDrive/My Libraries/Icons\-Proofs\fR).
 .TP
 .BI \-\-sizes " list"
-Comma-separated list of target resolutions for dist rendering (default: \fB512,256,128,64,32\fR).
+Comma-separated list of target resolutions or WxH dimensions (e.g. \fB512,256\fR or \fB1920x1080,1280x720\fR) overriding \fBmanifest.json\fR.
 .TP
 .BI \-\-agent ", " \-\-ssh\-agent
 Signs via OpenSSH Agent callback (Bitwarden Desktop \fB[Authorize]\fR GUI prompt). The raw private key never leaves the Bitwarden process (0 bytes in Python memory, 0 bytes on disk).
@@ -205,7 +205,7 @@ Raw PEM certificate chain passed via environment.
 .RS
 .nf
 media init duck v1
-# (place duck.xcf in 01_source/raw/ and duck_crop.png in 01_source/master/)
+# (place duck.xcf in source/raw/ and duck_master.png in source/master/)
 media build duck v1 --bw
 media audit duck v1
 .fi

@@ -29,6 +29,7 @@ import hashlib
 import io
 import base64
 import json
+import math
 import os
 import random
 import re
@@ -79,6 +80,7 @@ DEFAULT_POLICY_URL = "https://nada.mu/.well-known/security.txt"
 DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCreation"
 DEFAULT_WATERMARK = "NADAMU"
 DEFAULT_BW_ITEM = "c2pa-signer"
+DEFAULT_WATERMARK_CHALLENGE = b"c2pa:watermark:seed:v1:nada.mu"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -132,6 +134,13 @@ def load_config() -> dict[str, Any]:
         try:
             user_cfg = json.loads(DEFAULT_CONFIG_FILE.read_text(encoding="utf-8"))
             default_cfg.update(user_cfg)
+            # Automatic purge: if in ssh-agent mode, remove plaintext watermark_secret from disk
+            if default_cfg.get("signing_mode") == "ssh-agent" and "watermark_secret" in user_cfg:
+                user_cfg.pop("watermark_secret", None)
+                DEFAULT_CONFIG_FILE.write_text(
+                    json.dumps(user_cfg, indent=2) + "\n", encoding="utf-8"
+                )
+                default_cfg.pop("watermark_secret", None)
         except Exception as e:
             log_warn(f"Failed to parse {DEFAULT_CONFIG_FILE}: {e}")
     else:
@@ -156,11 +165,18 @@ def save_config(cfg: dict[str, Any]) -> None:
 
 
 def get_default_secret() -> str:
-    """Returns a deterministic watermark secret based on machine/user identity."""
+    """Returns a deterministic watermark secret based on machine/user identity or SSH agent."""
     salt = os.environ.get("C2PA_WATERMARK_SECRET")
     if salt:
         return salt
     cfg = load_config()
+    if cfg.get("signing_mode") == "ssh-agent":
+        try:
+            derived = derive_watermark_secret_from_ssh_agent(key_name=cfg.get("ssh_key_name"))
+            if derived:
+                return derived
+        except Exception:
+            pass
     if cfg.get("watermark_secret"):
         return str(cfg["watermark_secret"])
     ident = f"{os.uname().nodename}-{os.getlogin() if hasattr(os, 'getlogin') else 'user'}-NADAMU"
@@ -763,6 +779,60 @@ def create_c2pa_signer_from_ssh_agent(
     return c2pa.Signer.from_callback(_callback, alg, c_bytes.decode("utf-8"))
 
 
+def derive_watermark_secret_from_ssh_agent(
+    sock_path: Path | None = None,
+    key_name: str | None = None,
+    challenge: bytes = DEFAULT_WATERMARK_CHALLENGE,
+) -> str | None:
+    """Derives a deterministic watermark secret by signing a challenge via SSH agent (Ed25519/ECDSA).
+
+    Zero secret bytes on disk or in persistent configuration.
+    """
+    sock = sock_path or find_ssh_agent_socket()
+    if not sock or not sock.exists():
+        return None
+
+    try:
+        keys = ssh_agent_list_keys(sock)
+        if not keys:
+            return None
+
+        cfg = load_config()
+        target_name = key_name or cfg.get("ssh_key_name") or "c2pa-signer"
+
+        target_blob = None
+        target_type = None
+        target_comment = None
+
+        # 1. Match by name / comment
+        for k_blob, k_type, comm in keys:
+            if target_name.lower() in (comm or "").lower():
+                target_blob, target_type, target_comment = k_blob, k_type, comm
+                break
+
+        # 2. Match by ed25519 or ecdsa
+        if not target_blob:
+            for k_blob, k_type, comm in keys:
+                if "ed25519" in k_type.lower() or "ecdsa" in k_type.lower():
+                    target_blob, target_type, target_comment = k_blob, k_type, comm
+                    break
+
+        if not target_blob:
+            return None
+
+        if "ecdsa" in target_type.lower():
+            log_warn(f"SSH key '{target_comment}' is ECDSA. Ed25519 is strongly recommended for deterministic watermark derivation across all SSH agents.")
+
+        log_info(f"Deriving watermark secret via SSH Agent key '{target_comment}'...")
+        sig = ssh_agent_sign(sock, target_blob, target_type, challenge)
+        derived = hashlib.sha256(sig).hexdigest()
+        log_ok(f"Derived deterministic watermark secret from SSH Agent ({target_comment}).")
+        return derived
+    except Exception as e:
+        log_warn(f"Failed to derive watermark secret via SSH agent: {e}")
+        return None
+
+
 def keys_gen_ssh_agent(
     domain: str = DEFAULT_DOMAIN,
     key_name: str = "c2pa-signer",
@@ -770,7 +840,7 @@ def keys_gen_ssh_agent(
 ) -> None:
     """Binds C2PA certificates to an existing SSH Key (e.g. Bitwarden Desktop SSH Agent).
 
-    Zero private keys on disk or in memory.
+    Zero private keys and zero watermark secrets on disk or in persistent configuration.
     """
     log_head(f"Binding C2PA credentials to SSH Agent key: '{key_name}'...")
     sock = sock_path or find_ssh_agent_socket()
@@ -798,15 +868,15 @@ def keys_gen_ssh_agent(
 
     if not target_blob:
         for k_blob, k_type, comm in keys:
-            if "ecdsa" in k_type:
+            if "ed25519" in k_type.lower() or "ecdsa" in k_type.lower():
                 target_blob, target_type, target_comment = k_blob, k_type, comm
                 break
 
     if not target_blob:
         available_names = [f"'{c}' ({t})" for _, t, c in keys]
-        log_err(f"Could not find an ECDSA SSH key matching '{key_name}' in SSH agent.")
+        log_err(f"Could not find an Ed25519 or ECDSA SSH key matching '{key_name}' in SSH agent.")
         log_info(f"Available keys in agent: {', '.join(available_names) if available_names else 'None'}")
-        log_info("Please create an SSH Key item (ECDSA P-256) named 'c2pa-signer' in Bitwarden Desktop.")
+        log_info("Please ensure an SSH Key item (Ed25519 or ECDSA) is loaded in Bitwarden Desktop.")
         sys.exit(1)
 
     log_ok(f"Found active SSH key: '{target_comment}' ({target_type})")
@@ -820,20 +890,17 @@ def keys_gen_ssh_agent(
     log_info(f"Issuing X.509 C2PA certificates for {domain} (Root CA -> Leaf)...")
     chain_pem, root_key_pem, root_cert_pem = generate_c2pa_certs_for_public_key(pub_key, domain)
 
-    # Generate dedicated watermark secret
-    wm_secret = secrets.token_hex(16)
-
     # Save certificate chain to DEFAULT_CERT_PATH (public certificates only!)
     DEFAULT_CERT_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_CERT_PATH.write_bytes(chain_pem)
     os.chmod(DEFAULT_CERT_PATH, 0o644)
 
-    # Update configuration
+    # Update configuration (Zero-Disk: watermark secret is derived on-the-fly)
     cfg = load_config()
     cfg["signing_mode"] = "ssh-agent"
     cfg["ssh_key_name"] = target_comment
     cfg["ssh_agent_sock"] = str(sock)
-    cfg["watermark_secret"] = wm_secret
+    cfg.pop("watermark_secret", None)
     cfg["domain"] = domain
     cfg.pop("bitwarden_item", None)
     save_config(cfg)
@@ -841,18 +908,25 @@ def keys_gen_ssh_agent(
     log_ok(f"Public certificate chain saved: {DEFAULT_CERT_PATH}")
     log_ok(f"Signing mode configured: 'ssh-agent' in {DEFAULT_CONFIG_FILE}")
 
+    # Verify deterministic watermark secret derivation
+    try:
+        derived_wm = derive_watermark_secret_from_ssh_agent(sock_path=sock, key_name=target_comment)
+        if derived_wm:
+            log_ok(f"Verified deterministic watermark secret derivation ({derived_wm[:12]}...).")
+    except Exception as e:
+        log_warn(f"Watermark secret derivation test warning: {e}")
+
     print(f"\n  {C_BOLD}{C_GREEN}Zero-Knowledge SSH Agent Signing Active!{C_RESET}")
     print(f"  • Private key storage:     {C_CYAN}Bitwarden Desktop Vault (Protected){C_RESET}")
     print(f"  • Private key on disk:     {C_GREEN}0 bytes{C_RESET}")
     print(f"  • Private key in RAM:      {C_GREEN}0 bytes (Agent callback protocol){C_RESET}")
     print(f"  • Signature confirmation:  {C_CYAN}Bitwarden Desktop [Authorize] GUI prompt{C_RESET}")
-    print(f"  • Watermark secret:        {C_CYAN}{wm_secret}{C_RESET} (saved in {DEFAULT_CONFIG_FILE})\n")
-
+    print(f"  • Watermark secret:        {C_GREEN}0 bytes on disk (Derived on-the-fly via SSH Agent){C_RESET}\n")
     print(f"  {C_BOLD}Bitwarden Vault Recommendation:{C_RESET}")
     print(f"  Open Bitwarden Desktop -> edit SSH Key entry '{target_comment}':")
     print(f"    1. Add custom text field:   {C_BOLD}cert{C_RESET}             (Paste contents of {DEFAULT_CERT_PATH})")
-    print(f"    2. Add custom hidden field: {C_BOLD}watermark_secret{C_RESET} ({wm_secret})")
-    print(f"    3. Add custom hidden field: {C_BOLD}root_key{C_RESET}         (Root CA disaster recovery backup below)")
+    print(f"    2. Add custom hidden field: {C_BOLD}root_key{C_RESET}         (Root CA disaster recovery backup below)")
+    print(f"    • Watermark secret:         {C_GREEN}No field needed (Derived on-the-fly via SSH Agent){C_RESET}")
     print(f"\n{C_YELLOW}--- BEGIN ROOT CA PRIVATE KEY BACKUP ---{C_RESET}")
     print(root_key_pem.decode("utf-8").strip())
     print(f"{C_YELLOW}--- END ROOT CA PRIVATE KEY BACKUP ---{C_RESET}\n")
@@ -1406,6 +1480,9 @@ def process_signing(
 
     # Derive watermark permutation secret from key bytes or configuration
     wm_secret = secret
+    if not wm_secret and is_agent_mode:
+        k_target = agent_key_name or cfg.get("ssh_key_name")
+        wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
     if not wm_secret:
         if key_bytes:
             wm_secret = hashlib.sha256(key_bytes).hexdigest()
@@ -1519,6 +1596,8 @@ def inspect_image(
     secret: str | None = None,
     ots_path: Path | None = None,
     bw_item: str | None = None,
+    use_agent: bool = False,
+    agent_key_name: str | None = None,
 ) -> None:
     """Verifies C2PA Content Credentials, DWT-DCT invisible watermarks, and OpenTimestamps."""
     if not image_path.is_file():
@@ -1545,6 +1624,9 @@ def inspect_image(
     # 2. Verify DWT-DCT Invisible Watermark (Stage 2)
     cfg = load_config()
     wm_secret = secret
+    if not wm_secret and (use_agent or cfg.get("signing_mode") == "ssh-agent"):
+        k_target = agent_key_name or cfg.get("ssh_key_name")
+        wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
     if not wm_secret:
         env_creds = load_env_credentials()
         if env_creds:
@@ -1720,6 +1802,319 @@ def get_default_proofs_dir(icons_dir: Path | None = None) -> Path | None:
 
 
 # ------------------------------------------------------------------------------
+# Asset Pipeline: Manifest & Aspect Ratio Detection
+# ------------------------------------------------------------------------------
+def detect_aspect_ratio_and_targets(
+    w: int,
+    h: int,
+    name: str = "",
+    version: str = "",
+) -> dict[str, Any]:
+    """Auto-detects aspect ratio and sensible downscale targets based on master image dimensions."""
+    r = (w / h) if h > 0 else 1.0
+
+    if abs(r - 1.0) < 0.03:
+        ratio_name = "1:1"
+        targets = [
+            {"width": 512, "height": 512, "label": "512"},
+            {"width": 256, "height": 256, "label": "256"},
+            {"width": 128, "height": 128, "label": "128"},
+            {"width": 64, "height": 64, "label": "64"},
+            {"width": 32, "height": 32, "label": "32"},
+        ]
+        generate_favicon = True
+    elif abs(r - 16 / 9) < 0.03:
+        ratio_name = "16:9"
+        targets = [
+            {"width": 1920, "height": 1080, "label": "1920x1080"},
+            {"width": 1280, "height": 720, "label": "1280x720"},
+            {"width": 854, "height": 480, "label": "854x480"},
+            {"width": 640, "height": 360, "label": "640x360"},
+        ]
+        generate_favicon = False
+    elif abs(r - 16 / 10) < 0.03:
+        ratio_name = "16:10"
+        targets = [
+            {"width": 1920, "height": 1200, "label": "1920x1200"},
+            {"width": 1440, "height": 900, "label": "1440x900"},
+            {"width": 1280, "height": 800, "label": "1280x800"},
+            {"width": 640, "height": 400, "label": "640x400"},
+        ]
+        generate_favicon = False
+    elif abs(r - 4 / 3) < 0.03:
+        ratio_name = "4:3"
+        targets = [
+            {"width": 1600, "height": 1200, "label": "1600x1200"},
+            {"width": 1200, "height": 900, "label": "1200x900"},
+            {"width": 800, "height": 600, "label": "800x600"},
+            {"width": 640, "height": 480, "label": "640x480"},
+        ]
+        generate_favicon = False
+    elif abs(r - 21 / 9) < 0.05 or abs(r - 64 / 27) < 0.05:
+        ratio_name = "21:9"
+        targets = [
+            {"width": 2560, "height": 1080, "label": "2560x1080"},
+            {"width": 1920, "height": 810, "label": "1920x810"},
+            {"width": 1280, "height": 540, "label": "1280x540"},
+        ]
+        generate_favicon = False
+    elif abs(r - 9 / 16) < 0.03:
+        ratio_name = "9:16"
+        targets = [
+            {"width": 1080, "height": 1920, "label": "1080x1920"},
+            {"width": 720, "height": 1280, "label": "720x1280"},
+            {"width": 360, "height": 640, "label": "360x640"},
+        ]
+        generate_favicon = False
+    elif abs(r - 3 / 4) < 0.03:
+        ratio_name = "3:4"
+        targets = [
+            {"width": 1200, "height": 1600, "label": "1200x1600"},
+            {"width": 900, "height": 1200, "label": "900x1200"},
+            {"width": 600, "height": 800, "label": "600x800"},
+        ]
+        generate_favicon = False
+    else:
+        gcd_val = math.gcd(w, h)
+        ratio_name = f"{w // gcd_val}:{h // gcd_val}" if gcd_val > 1 else f"{w}x{h}"
+        targets = []
+        for step in (1.0, 0.75, 0.5, 0.25):
+            tw = max(16, round(w * step))
+            th = max(16, round(h * step))
+            targets.append({"width": tw, "height": th, "label": f"{tw}x{th}"})
+        generate_favicon = (w == h)
+
+    # Filter out targets larger than master image
+    filtered_targets = [t for t in targets if t["width"] <= w * 1.05 and t["height"] <= h * 1.05]
+    if not filtered_targets:
+        filtered_targets = [{"width": w, "height": h, "label": (str(w) if w == h else f"{w}x{h}")}]
+        if w >= 64 and h >= 64:
+            filtered_targets.append({
+                "width": w // 2,
+                "height": h // 2,
+                "label": (str(w // 2) if w == h else f"{w // 2}x{h // 2}"),
+            })
+
+    return {
+        "name": name,
+        "version": version,
+        "aspect_ratio": ratio_name,
+        "master_dimensions": f"{w}x{h}",
+        "generate_favicon": generate_favicon,
+        "formats": ["webp", "png"],
+        "signed": {
+            "enabled": True,
+            "sizes": [1024],
+        },
+        "targets": filtered_targets,
+    }
+
+
+def load_or_resolve_manifest(
+    target_dir: Path,
+    name: str,
+    version: str,
+    master_path: Path | None = None,
+    sizes_cli: str | None = None,
+) -> dict[str, Any]:
+    """Loads manifest.json from target_dir (or parent), or auto-detects from master image."""
+    manifest_file = target_dir / "manifest.json"
+    if not manifest_file.is_file() and (target_dir.parent / "manifest.json").is_file():
+        manifest_file = target_dir.parent / "manifest.json"
+
+    manifest: dict[str, Any] = {}
+    if manifest_file.is_file():
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception as e:
+            log_warn(f"Failed to read existing manifest {manifest_file}: {e}")
+            manifest = {}
+
+    # Inspect master image dimensions if available
+    master_w, master_h = 0, 0
+    if master_path and master_path.is_file():
+        try:
+            with Image.open(master_path) as img:
+                master_w, master_h = img.size
+        except Exception:
+            pass
+
+    # If manifest is empty or aspect_ratio was "auto", compute from master
+    if not manifest:
+        if master_w > 0 and master_h > 0:
+            manifest = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
+            save_path = target_dir / "manifest.json"
+            try:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(save_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2)
+                    f.write("\n")
+                log_ok(f"Generated asset manifest ({manifest['aspect_ratio']}): {save_path.name}")
+            except Exception as e:
+                log_warn(f"Could not save manifest: {e}")
+        else:
+            manifest = {
+                "name": name,
+                "version": version,
+                "aspect_ratio": "1:1",
+                "generate_favicon": True,
+                "formats": ["webp", "png"],
+                "signed": {
+                    "enabled": True,
+                    "sizes": [1024],
+                },
+                "targets": [
+                    {"width": 512, "height": 512, "label": "512"},
+                    {"width": 256, "height": 256, "label": "256"},
+                    {"width": 128, "height": 128, "label": "128"},
+                    {"width": 64, "height": 64, "label": "64"},
+                    {"width": 32, "height": 32, "label": "32"},
+                ],
+            }
+    elif manifest.get("aspect_ratio") == "auto":
+        # Manifest exists from init with "auto" aspect ratio: update ratio and dimensions, but keep user custom fields
+        if master_w > 0 and master_h > 0:
+            auto_m = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
+            manifest["aspect_ratio"] = auto_m["aspect_ratio"]
+            manifest["master_dimensions"] = auto_m["master_dimensions"]
+            if auto_m["aspect_ratio"] != "1:1" and (not manifest.get("targets") or manifest.get("targets") == [
+                {"width": 512, "height": 512, "label": "512"},
+                {"width": 256, "height": 256, "label": "256"},
+                {"width": 128, "height": 128, "label": "128"},
+                {"width": 64, "height": 64, "label": "64"},
+                {"width": 32, "height": 32, "label": "32"},
+            ]):
+                manifest["targets"] = auto_m["targets"]
+                manifest["generate_favicon"] = auto_m["generate_favicon"]
+            if "signed" not in manifest:
+                manifest["signed"] = auto_m.get("signed", {"enabled": True, "sizes": [1024]})
+            save_path = target_dir / "manifest.json"
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2)
+                    f.write("\n")
+                log_ok(f"Updated asset manifest ({manifest['aspect_ratio']}): {save_path.name}")
+            except Exception as e:
+                log_warn(f"Could not save manifest: {e}")
+
+    # Handle CLI --sizes override if provided
+    r = (master_w / master_h) if (master_w > 0 and master_h > 0) else 1.0
+    is_sq = abs(r - 1.0) < 0.03
+    if sizes_cli:
+        cli_targets = []
+        for part in sizes_cli.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "x" in part.lower():
+                pw, ph = part.lower().split("x", 1)
+                tw, th = int(pw), int(ph)
+                cli_targets.append({"width": tw, "height": th, "label": f"{tw}x{th}"})
+            else:
+                dim = int(part)
+                if is_sq:
+                    cli_targets.append({"width": dim, "height": dim, "label": str(dim)})
+                else:
+                    th = max(1, round(dim / r))
+                    cli_targets.append({"width": dim, "height": th, "label": f"{dim}x{th}"})
+        if cli_targets:
+            manifest["targets"] = cli_targets
+
+    # Normalize targets in manifest
+    normalized_targets: list[dict[str, Any]] = []
+    raw_targets = manifest.get("targets") or manifest.get("sizes") or []
+    for item in raw_targets:
+        if isinstance(item, int):
+            if is_sq:
+                normalized_targets.append({"width": item, "height": item, "label": str(item)})
+            else:
+                th = max(1, round(item / r))
+                normalized_targets.append({"width": item, "height": th, "label": f"{item}x{th}"})
+        elif isinstance(item, str):
+            if "x" in item.lower():
+                pw, ph = item.lower().split("x", 1)
+                tw, th = int(pw), int(ph)
+                normalized_targets.append({"width": tw, "height": th, "label": f"{tw}x{th}"})
+            else:
+                dim = int(item)
+                if is_sq:
+                    normalized_targets.append({"width": dim, "height": dim, "label": str(dim)})
+                else:
+                    th = max(1, round(dim / r))
+                    normalized_targets.append({"width": dim, "height": th, "label": f"{dim}x{th}"})
+        elif isinstance(item, dict):
+            tw = int(item["width"])
+            th = int(item["height"])
+            lbl = item.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
+            normalized_targets.append({"width": tw, "height": th, "label": lbl})
+
+    manifest["targets"] = normalized_targets
+
+    # Normalize signed configuration in manifest
+    raw_signed = manifest.get("signed")
+    if raw_signed is None:
+        raw_signed = manifest.get("showcase")
+
+    signed_config: dict[str, Any] = {"enabled": True, "sizes": [1024], "targets": []}
+    if raw_signed is False:
+        signed_config["enabled"] = False
+        signed_config["sizes"] = []
+    elif isinstance(raw_signed, (int, str)):
+        signed_config["enabled"] = True
+        signed_config["sizes"] = [raw_signed]
+    elif isinstance(raw_signed, list):
+        signed_config["enabled"] = True
+        signed_config["sizes"] = raw_signed
+    elif isinstance(raw_signed, dict):
+        signed_config["enabled"] = bool(raw_signed.get("enabled", True))
+        raw_sizes = raw_signed.get("sizes") or ([raw_signed.get("size")] if raw_signed.get("size") else [1024])
+        signed_config["sizes"] = raw_sizes if isinstance(raw_sizes, list) else [raw_sizes]
+
+    signed_targets: list[dict[str, Any]] = []
+    if signed_config["enabled"]:
+        for item in signed_config["sizes"]:
+            if isinstance(item, int):
+                dim = item
+                if is_sq:
+                    signed_targets.append({"width": dim, "height": dim, "label": str(dim)})
+                else:
+                    if master_w >= master_h:
+                        tw = dim
+                        th = max(1, round(dim / r))
+                    else:
+                        th = dim
+                        tw = max(1, round(dim * r))
+                    signed_targets.append({"width": tw, "height": th, "label": str(dim)})
+            elif isinstance(item, str):
+                if "x" in item.lower():
+                    pw, ph = item.lower().split("x", 1)
+                    signed_targets.append({"width": int(pw), "height": int(ph), "label": f"{int(pw)}x{int(ph)}"})
+                else:
+                    dim = int(item)
+                    if is_sq:
+                        signed_targets.append({"width": dim, "height": dim, "label": str(dim)})
+                    else:
+                        if master_w >= master_h:
+                            tw = dim
+                            th = max(1, round(dim / r))
+                        else:
+                            th = dim
+                            tw = max(1, round(dim * r))
+                        signed_targets.append({"width": tw, "height": th, "label": str(dim)})
+            elif isinstance(item, dict):
+                tw = int(item["width"])
+                th = int(item["height"])
+                lbl = item.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
+                signed_targets.append({"width": tw, "height": th, "label": lbl})
+
+    signed_config["targets"] = signed_targets
+    manifest["signed"] = signed_config
+
+    return manifest
+
+
+# ------------------------------------------------------------------------------
 # Asset Pipeline: Init, Build, Audit, List, Upgrade
 # ------------------------------------------------------------------------------
 def execute_init(
@@ -1728,27 +2123,56 @@ def execute_init(
     base_dir: Path | None = None,
     proofs_dir: Path | None = None,
 ) -> tuple[Path, Path | None]:
-    """Initializes standard asset folder hierarchy."""
+    """Initializes standard asset folder hierarchy with clean directory names and manifest."""
     icons_dir = base_dir or get_default_icons_dir()
     resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
 
     target_dir = icons_dir / name / version
-    raw_dir = target_dir / "01_source" / "raw"
-    master_dir = target_dir / "01_source" / "master"
-    signed_dir = target_dir / "02_signed"
-    dist_dir = target_dir / "03_dist"
+    raw_dir = target_dir / "source" / "raw"
+    master_dir = target_dir / "source" / "master"
+    signed_dir = target_dir / "signed"
+    dist_dir = target_dir / "dist"
 
     raw_dir.mkdir(parents=True, exist_ok=True)
     master_dir.mkdir(parents=True, exist_ok=True)
     signed_dir.mkdir(parents=True, exist_ok=True)
     dist_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize default manifest.json if absent
+    manifest_path = target_dir / "manifest.json"
+    if not manifest_path.exists():
+        manifest_data = {
+            "name": name,
+            "version": version,
+            "aspect_ratio": "auto",
+            "generate_favicon": True,
+            "formats": ["webp", "png"],
+            "signed": {
+                "enabled": True,
+                "sizes": [1024],
+            },
+            "targets": [
+                {"width": 512, "height": 512, "label": "512"},
+                {"width": 256, "height": 256, "label": "256"},
+                {"width": 128, "height": 128, "label": "128"},
+                {"width": 64, "height": 64, "label": "64"},
+                {"width": 32, "height": 32, "label": "32"},
+            ],
+        }
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest_data, f, indent=2)
+                f.write("\n")
+            log_ok(f"Build Manifest: {manifest_path}")
+        except Exception as e:
+            log_warn(f"Failed to create manifest {manifest_path}: {e}")
+
     target_proofs_dir = None
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
-        (target_proofs_dir / "01_source" / "raw").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / "01_source" / "master").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / "02_signed").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "source" / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "source" / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "signed").mkdir(parents=True, exist_ok=True)
 
     log_head(f"Initialized Asset Structure: {name} ({version})")
     log_ok(f"Raw Project:    {raw_dir}")
@@ -1760,8 +2184,9 @@ def execute_init(
 
     print(f"\n  {C_BOLD}Next steps:{C_RESET}")
     print(f"    1. Place raw canvas (e.g. {name}.xcf) into: {C_CYAN}{raw_dir}/{C_RESET}")
-    print(f"    2. Place square master PNG into:            {C_CYAN}{master_dir}/{C_RESET}")
-    print(f"    3. Run build: {C_GREEN}media build {name} {version}{C_RESET}\n")
+    print(f"    2. Place master image (PNG/WebP) into:      {C_CYAN}{master_dir}/{C_RESET}")
+    print(f"    3. (Optional) Customize sizes in:          {C_CYAN}{manifest_path}/{C_RESET}")
+    print(f"    4. Run build: {C_GREEN}media build {name} {version}{C_RESET}\n")
 
     return target_dir, target_proofs_dir
 
@@ -1776,6 +2201,23 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
             rel = ots.relative_to(proofs_dir)
             base_name = ots.name[:-4]
             expected_target = target_dir / rel.parent / base_name
+
+            # Seamless backward-compatibility check for legacy '01_source' / '02_signed' paths
+            if not expected_target.is_file():
+                rel_parts = list(rel.parent.parts)
+                for idx, part in enumerate(rel_parts):
+                    if part == "source":
+                        rel_parts[idx] = "01_source"
+                    elif part == "01_source":
+                        rel_parts[idx] = "source"
+                    elif part == "signed":
+                        rel_parts[idx] = "02_signed"
+                    elif part == "02_signed":
+                        rel_parts[idx] = "signed"
+                alt_target = target_dir / Path(*rel_parts) / base_name
+                if alt_target.is_file():
+                    expected_target = alt_target
+
             all_ots_map[ots] = expected_target
 
     if target_dir.is_dir():
@@ -1821,11 +2263,19 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                 ),
             })
 
-    src_dir = target_dir / "01_source"
+    src_dir = target_dir / "source"
+    if not src_dir.is_dir() and (target_dir / "01_source").is_dir():
+        src_dir = target_dir / "01_source"
+
     if src_dir.is_dir():
         target_files_checked = set(all_ots_map.values())
         for f in src_dir.rglob("*"):
-            if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith("."):
+            if (
+                f.is_file()
+                and not f.name.endswith(".ots")
+                and not f.name.startswith(".")
+                and f.name != "manifest.json"
+            ):
                 if f not in target_files_checked:
                     violations.append({
                         "path": str(f.relative_to(target_dir)),
@@ -1863,6 +2313,7 @@ def execute_build(
     base_dir: Path | None = None,
     proofs_dir: Path | None = None,
     sizes: list[int] | None = None,
+    sizes_cli: str | None = None,
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
@@ -1874,11 +2325,21 @@ def execute_build(
     icons_dir = base_dir or get_default_icons_dir()
     resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
     target_dir = icons_dir / name / version
-    src_dir = target_dir / "01_source"
+
+    # Resolve directories with backward-compatibility for legacy 01_source / 02_signed / 03_dist
+    src_dir = target_dir / "source"
+    if not src_dir.is_dir() and (target_dir / "01_source").is_dir():
+        src_dir = target_dir / "01_source"
     raw_dest_dir = src_dir / "raw"
     master_dest_dir = src_dir / "master"
-    signed_dir = target_dir / "02_signed"
-    dist_dir = target_dir / "03_dist"
+
+    signed_dir = target_dir / "signed"
+    if not signed_dir.is_dir() and (target_dir / "02_signed").is_dir():
+        signed_dir = target_dir / "02_signed"
+
+    dist_dir = target_dir / "dist"
+    if not dist_dir.is_dir() and (target_dir / "03_dist").is_dir():
+        dist_dir = target_dir / "03_dist"
 
     # Auto-detect existing master if not provided
     if master_path is None:
@@ -1924,11 +2385,31 @@ def execute_build(
         sys.exit(1)
 
     target_proofs_dir = None
+    proofs_src_name = "source"
+    proofs_signed_name = "signed"
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
-        (target_proofs_dir / "01_source" / "raw").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / "01_source" / "master").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / "02_signed").mkdir(parents=True, exist_ok=True)
+        if (resolved_proofs_dir / name / version / "01_source").is_dir():
+            proofs_src_name = "01_source"
+        if (resolved_proofs_dir / name / version / "02_signed").is_dir():
+            proofs_signed_name = "02_signed"
+
+        (target_proofs_dir / proofs_src_name / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / proofs_src_name / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / proofs_signed_name).mkdir(parents=True, exist_ok=True)
+
+    # Load or resolve scale manifest (targets, aspect ratio, favicon)
+    manifest_cli_str = sizes_cli or (",".join(str(s) for s in sizes) if sizes else None)
+    manifest = load_or_resolve_manifest(
+        target_dir=target_dir,
+        name=name,
+        version=version,
+        master_path=master_path,
+        sizes_cli=manifest_cli_str,
+    )
+    targets = manifest.get("targets", [])
+    formats = manifest.get("formats", ["webp", "png"])
+    aspect_ratio = manifest.get("aspect_ratio", "auto")
 
     log_head(f"Building Media Asset: {name} ({version})")
     log_info(f"Target Directory: {target_dir}")
@@ -1937,6 +2418,7 @@ def execute_build(
     log_info(f"Master Image:     {master_path}")
     if raw_path:
         log_info(f"Raw Project:      {raw_path}")
+    log_info(f"Aspect Ratio:     {aspect_ratio} ({len(targets)} targets: {', '.join(t.get('label', '') for t in targets)})")
 
     # 1. Pre-flight Audit if target directory exists
     if target_dir.is_dir():
@@ -1965,7 +2447,7 @@ def execute_build(
         if not no_stamp:
             local_ots = dest_raw.with_name(f"{dest_raw.name}.ots")
             final_ots = (
-                (target_proofs_dir / "01_source" / "raw" / f"{dest_raw.name}.ots")
+                (target_proofs_dir / proofs_src_name / "raw" / f"{dest_raw.name}.ots")
                 if target_proofs_dir
                 else local_ots
             )
@@ -1989,7 +2471,7 @@ def execute_build(
     if not no_stamp:
         local_ots = dest_master.with_name(f"{dest_master.name}.ots")
         final_ots = (
-            (target_proofs_dir / "01_source" / "master" / f"{dest_master.name}.ots")
+            (target_proofs_dir / proofs_src_name / "master" / f"{dest_master.name}.ots")
             if target_proofs_dir
             else local_ots
         )
@@ -2003,65 +2485,93 @@ def execute_build(
     dest_master.chmod(0o444)
     log_ok(f"Normalized master secured: {dest_master.name} (0444)")
 
-    # 4. Stage 3: Render and Sign Showcase Release (1024x1024)
-    signed_target = signed_dir / f"{name}_1024_signed.png"
-    log_info("Rendering 1024x1024 showcase PNG...")
-    try:
-        with Image.open(master_path) as pil_master:
-            showcase_img = pil_master.convert("RGBA")
-            if showcase_img.width > 1024 or showcase_img.height > 1024:
-                showcase_img = showcase_img.resize((1024, 1024), Image.Resampling.LANCZOS)
-            showcase_tmp = target_dir / f".tmp_showcase_{name}.png"
-            showcase_img.save(showcase_tmp, format="PNG")
-    except Exception as e:
-        log_err(f"Failed to load or resize master image: {e}")
-        sys.exit(1)
+    # 4. Stage 3: Render and Sign Showcase Release(s)
+    signed_config = manifest.get(
+        "signed",
+        {"enabled": True, "targets": [{"width": 1024, "height": 1024, "label": "1024"}]},
+    )
+    signed_targets_list = signed_config.get("targets", []) if signed_config.get("enabled", True) else []
 
-    if not no_sign:
-        log_info("Cryptographically signing showcase release (C2PA + Watermark + OpenTimestamps)...")
-        process_signing(
-            input_path=showcase_tmp,
-            output_path=signed_target,
-            stamp=(not no_stamp),
-            bw_item=bw_item,
-            use_agent=use_agent,
-            agent_key_name=agent_key_name,
-        )
-        showcase_tmp.unlink(missing_ok=True)
-        local_showcase_ots = signed_target.with_name(f"{signed_target.name}.ots")
-        if target_proofs_dir and local_showcase_ots.is_file():
-            final_showcase_ots = target_proofs_dir / "02_signed" / f"{signed_target.name}.ots"
-            shutil.move(local_showcase_ots, final_showcase_ots)
-            final_showcase_ots.chmod(0o444)
-        log_ok(f"Showcase release signed: {signed_target.name}")
+    if not signed_targets_list:
+        log_info("Stage 3: Signed showcase release skipped (disabled in manifest).")
     else:
-        shutil.move(showcase_tmp, signed_target)
-        log_ok(f"Showcase release saved without signing: {signed_target.name}")
+        for st in signed_targets_list:
+            lbl = st.get("label", "1024")
+            tw = st["width"]
+            th = st["height"]
+            signed_target = signed_dir / f"{name}_{lbl}_signed.png"
+            log_info(f"Rendering showcase PNG ({tw}x{th}) -> {signed_target.name}...")
+            try:
+                with Image.open(master_path) as pil_master:
+                    showcase_img = pil_master.convert("RGBA")
+                    if (showcase_img.width, showcase_img.height) != (tw, th):
+                        showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
+                    showcase_tmp = target_dir / f".tmp_showcase_{name}_{lbl}.png"
+                    showcase_img.save(showcase_tmp, format="PNG")
+            except Exception as e:
+                log_err(f"Failed to load or resize master image: {e}")
+                sys.exit(1)
 
-    # 5. Stage 4: Render Multi-Scale Distribution (Dist)
-    target_sizes = sizes or [512, 256, 128, 64, 32]
-    log_info(f"Rendering distribution assets ({target_sizes}) into 03_dist/...")
+            if not no_sign:
+                log_info(f"Cryptographically signing showcase release ({signed_target.name})...")
+                process_signing(
+                    input_path=showcase_tmp,
+                    output_path=signed_target,
+                    stamp=(not no_stamp),
+                    bw_item=bw_item,
+                    use_agent=use_agent,
+                    agent_key_name=agent_key_name,
+                )
+                showcase_tmp.unlink(missing_ok=True)
+                local_showcase_ots = signed_target.with_name(f"{signed_target.name}.ots")
+                if target_proofs_dir and local_showcase_ots.is_file():
+                    final_showcase_ots = target_proofs_dir / proofs_signed_name / f"{signed_target.name}.ots"
+                    shutil.move(local_showcase_ots, final_showcase_ots)
+                    final_showcase_ots.chmod(0o444)
+                log_ok(f"Showcase release signed: {signed_target.name} ({tw}x{th})")
+            else:
+                shutil.move(showcase_tmp, signed_target)
+                log_ok(f"Showcase release saved without signing: {signed_target.name} ({tw}x{th})")
+
+    # 5. Stage 4: Render Multi-Scale Distribution (Dist) from Manifest Targets
+    log_info(f"Rendering distribution assets ({len(targets)} targets) into dist/...")
 
     try:
         with Image.open(master_path) as pil_master:
             rgba_base = pil_master.convert("RGBA")
+            is_square = (rgba_base.width == rgba_base.height)
 
-            # Multi-layer favicon.ico container (16, 32, 48, 64, 128, 256)
-            ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-            ico_path = dist_dir / "favicon.ico"
-            rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
-            log_ok("Rendered multi-resolution favicon.ico (16..256)")
+            # Multi-layer favicon.ico container
+            gen_favicon = manifest.get("generate_favicon", is_square)
+            if gen_favicon:
+                ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+                ico_path = dist_dir / "favicon.ico"
+                if is_square:
+                    rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
+                else:
+                    sq_dim = min(rgba_base.width, rgba_base.height)
+                    left = (rgba_base.width - sq_dim) // 2
+                    top = (rgba_base.height - sq_dim) // 2
+                    crop_sq = rgba_base.crop((left, top, left + sq_dim, top + sq_dim))
+                    crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
+                log_ok("Rendered multi-resolution favicon.ico (16..256)")
 
-            # WebP and PNG downscales
-            for s in target_sizes:
-                res_img = rgba_base.resize((s, s), Image.Resampling.LANCZOS)
-                res_img.save(dist_dir / f"{name}_{s}.webp", format="WEBP", quality=90, method=6)
-                res_img.save(dist_dir / f"{name}_{s}.png", format="PNG", optimize=True)
+            generated_count = 0
+            for t in targets:
+                tw, th = t["width"], t["height"]
+                lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
+                res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
+                if "webp" in formats:
+                    res_img.save(dist_dir / f"{name}_{lbl}.webp", format="WEBP", quality=90, method=6)
+                    generated_count += 1
+                if "png" in formats:
+                    res_img.save(dist_dir / f"{name}_{lbl}.png", format="PNG", optimize=True)
+                    generated_count += 1
     except Exception as e:
         log_err(f"Failed during dist rendering: {e}")
         sys.exit(1)
 
-    log_ok(f"Generated {len(target_sizes) * 2 + 1} distribution files in {dist_dir.name}/")
+    log_ok(f"Generated {generated_count + (1 if gen_favicon else 0)} distribution files in dist/")
 
     # 6. Stage 5: Update 'latest' Symlinks
     latest_symlink = icons_dir / name / "latest"
@@ -2148,7 +2658,10 @@ def keys_show(bw_item: str | None = None) -> None:
 
         print(f"  {C_BOLD}Cert File:{C_RESET}        {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
         wm_sec = cfg.get("watermark_secret")
-        print(f"  {C_BOLD}Watermark Key:{C_RESET}    {'Configured in c2pa.json' if wm_sec else 'Default fallback'}")
+        if wm_sec:
+            print(f"  {C_BOLD}Watermark Key:{C_RESET}    {C_YELLOW}Explicitly configured in c2pa.json{C_RESET}")
+        else:
+            print(f"  {C_BOLD}Watermark Key:{C_RESET}    {C_GREEN}Derived on-the-fly via SSH Agent (Zero-Disk / Ed25519){C_RESET}")
         print(f"  {C_BOLD}Private Key RAM:{C_RESET}  {C_GREEN}0 bytes (Never leaves Bitwarden process){C_RESET}")
         print(f"  {C_BOLD}Private Key Disk:{C_RESET} {C_GREEN}0 bytes (Never written to filesystem){C_RESET}\n")
         return
@@ -2177,7 +2690,7 @@ def keys_show(bw_item: str | None = None) -> None:
     print(f"  {C_BOLD}Key File:{C_RESET}         {DEFAULT_KEY_PATH} ({'Found' if DEFAULT_KEY_PATH.is_file() else 'Missing'})")
     print(f"  {C_BOLD}Cert File:{C_RESET}        {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
     print(f"\n  {C_CYAN}To use Bitwarden SSH Agent (Zero keys in RAM / disk):{C_RESET}")
-    print(f"    1. Create SSH Key item 'c2pa-signer' (ECDSA P-256) in Bitwarden")
+    print(f"    1. Create SSH Key item 'c2pa-signer' (Ed25519 or ECDSA) in Bitwarden")
     print(f"    2. media keys gen --agent")
     print(f"    3. rm -rf {DEFAULT_KEY_DIR}\n")
 
@@ -2281,6 +2794,7 @@ def keys_use(item_name: str | None = None) -> None:
             sys.exit(1)
         cfg["signing_mode"] = "ssh-agent"
         cfg["bitwarden_item"] = None
+        cfg.pop("watermark_secret", None)
         save_config(cfg)
         key_name = cfg.get("ssh_key_name", "c2pa-signer")
         log_ok(f"Configured SSH Agent ('{key_name}') as default signing source in {DEFAULT_CONFIG_FILE}.")
@@ -2343,11 +2857,11 @@ Automation & Keys Examples:
     p_build = subparsers.add_parser("build", help="Build and render an asset version from master")
     p_build.add_argument("name", type=str, help="Asset identifier slug (e.g. duck, logo)")
     p_build.add_argument("version", type=str, help="Version tag (e.g. v1, v2, 2026.1)")
-    p_build.add_argument("-m", "--master", type=Path, default=None, help="Cropped master square PNG/WebP (auto-detected in 01_source/master/)")
-    p_build.add_argument("-r", "--raw", type=Path, default=None, help="Project canvas XCF/PSD/SVG (auto-detected in 01_source/raw/)")
+    p_build.add_argument("-m", "--master", type=Path, default=None, help="Cropped master PNG/WebP (auto-detected in source/master/)")
+    p_build.add_argument("-r", "--raw", type=Path, default=None, help="Project canvas XCF/PSD/SVG (auto-detected in source/raw/)")
     p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
     p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
-    p_build.add_argument("--sizes", type=str, default="512,256,128,64,32", help="Comma-separated dist resolutions")
+    p_build.add_argument("--sizes", type=str, default=None, help="Comma-separated dist resolutions or WxH sizes (overrides manifest.json)")
     p_build.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
     p_build.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Bitwarden item name for C2PA keys")
@@ -2400,6 +2914,8 @@ Automation & Keys Examples:
     p_verify.add_argument("file", type=Path, help="Target media file to inspect")
     p_verify.add_argument("--ots", type=Path, help="Path to custom or detached .ots proof file")
     p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
+    p_verify.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Derive watermark secret via SSH Agent (Bitwarden)")
+    p_verify.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_verify.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch watermark secret from Bitwarden into RAM")
     p_verify.add_argument("--json", action="store_true", help="Output raw verification report in JSON")
 
@@ -2463,11 +2979,6 @@ Automation & Keys Examples:
 
     # Dispatch: build
     elif args.command == "build":
-        try:
-            parsed_sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
-        except ValueError:
-            parsed_sizes = [512, 256, 128, 64, 32]
-
         execute_build(
             name=args.name,
             version=args.version,
@@ -2475,7 +2986,7 @@ Automation & Keys Examples:
             raw_path=args.raw,
             base_dir=base_dir,
             proofs_dir=proofs_base,
-            sizes=parsed_sizes,
+            sizes_cli=args.sizes,
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),
@@ -2574,6 +3085,8 @@ Automation & Keys Examples:
             secret=args.secret,
             ots_path=args.ots,
             bw_item=args.bw_item,
+            use_agent=getattr(args, "agent", False),
+            agent_key_name=getattr(args, "key_name", None),
         )
 
     # Dispatch: stamp

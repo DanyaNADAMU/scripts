@@ -13,6 +13,13 @@ GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
 GITHUB_RAW_RESOLVED=""
 COMMIT_SHA=""
 
+# Ensure standard user and system binary paths are present in PATH
+for _p in /usr/local/bin /usr/local/sbin "$HOME/.local/bin"; do
+    if [ -d "$_p" ] && [[ ":$PATH:" != *":$_p:"* ]]; then
+        export PATH="$_p:$PATH"
+    fi
+done
+
 # Determine execution context (local repository vs remote/standalone)
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 REPO_DIR="$(cd "$(dirname "$SELF_PATH")" 2>/dev/null && pwd || echo "")"
@@ -152,18 +159,41 @@ check_dependencies() {
     local auto_yes="$2"
     local scope="${3:-user}"
 
-    if [ "$cat" = "all" ] || [ "$cat" = "media" ]; then
-        # Check standard PATH first
+    if [ "$cat" = "all" ] || [ "$cat" = "media" ] || [ "$cat" = "desktop" ] || [ "$cat" = "server" ]; then
+        # Ensure standard paths are active in PATH
+        for _p in /usr/local/bin /usr/local/sbin /usr/bin "$HOME/.local/bin"; do
+            if [ -d "$_p" ] && [[ ":$PATH:" != *":$_p:"* ]]; then
+                export PATH="$_p:$PATH"
+            fi
+        done
+
+        # If running via sudo, check the original user's local bin as well
+        if [ -n "${SUDO_USER:-}" ] && [ "$EUID" -eq 0 ]; then
+            local user_home
+            user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+            if [ -n "$user_home" ] && [ -d "$user_home/.local/bin" ] && [[ ":$PATH:" != *":$user_home/.local/bin:"* ]]; then
+                export PATH="$user_home/.local/bin:$PATH"
+            fi
+        fi
+
+        # Check for uv binary in known candidate locations if not yet in PATH
         if ! command -v uv &>/dev/null; then
-            # If uv exists in user's local bin, utilize it
-            if [ -x "$HOME/.local/bin/uv" ]; then
-                export PATH="$HOME/.local/bin:$PATH"
-                if [ "$scope" = "system" ] || [ "$EUID" -eq 0 ]; then
-                    mkdir -p /usr/local/bin
-                    cp -f "$HOME/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || true
-                    cp -f "$HOME/.local/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true
-                    chmod 755 /usr/local/bin/uv /usr/local/bin/uvx 2>/dev/null || true
+            for _cand in /usr/local/bin/uv /usr/bin/uv "$HOME/.local/bin/uv"; do
+                if [ -x "$_cand" ]; then
+                    export PATH="$(dirname "$_cand"):$PATH"
+                    break
                 fi
+            done
+        fi
+
+        # In system scope or when running as root, ensure /usr/local/bin/uv is symlinked to /usr/bin
+        # to permanently resolve the Debian/Ubuntu/Kali sudo secure_path restriction
+        if [ -x "/usr/local/bin/uv" ] && ([ "$scope" = "system" ] || [ "$EUID" -eq 0 ]); then
+            if [ ! -e "/usr/bin/uv" ] || [ -L "/usr/bin/uv" ]; then
+                ln -sf /usr/local/bin/uv /usr/bin/uv 2>/dev/null || true
+            fi
+            if [ -x "/usr/local/bin/uvx" ] && ([ ! -e "/usr/bin/uvx" ] || [ -L "/usr/bin/uvx" ]); then
+                ln -sf /usr/local/bin/uvx /usr/bin/uvx 2>/dev/null || true
             fi
         fi
 
@@ -175,14 +205,16 @@ check_dependencies() {
             fi
             if curl -LsSf --connect-timeout 5 --max-time 30 https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$target_dir" sh; then
                 export PATH="$target_dir:$PATH"
+                if [ -x "$target_dir/uv" ] && [ "$target_dir" = "/usr/local/bin" ] && ([ "$scope" = "system" ] || [ "$EUID" -eq 0 ]); then
+                    ln -sf /usr/local/bin/uv /usr/bin/uv 2>/dev/null || true
+                    ln -sf /usr/local/bin/uvx /usr/bin/uvx 2>/dev/null || true
+                fi
                 if command -v uv &>/dev/null; then
                     log_ok "'uv' installed successfully into $target_dir."
                 fi
             else
-                log_warn "uv auto-install failed. Media tool (media) may require uv to run."
+                log_warn "uv auto-install failed. Python utilities may require uv to run."
             fi
-        else
-            log_ok "Dependency check: 'uv' is available."
         fi
     fi
 }
@@ -504,8 +536,8 @@ cmd_list() {
     load_manifest "$tmp_m"
 
     log_head "Available and Installed Scripts (Scope: $scope -> $BIN_DIR)"
-    printf "  %-16s %-10s %-12s %s\n" "COMMAND" "CATEGORY" "STATUS" "DESCRIPTION"
-    printf "  %-16s %-10s %-12s %s\n" "-------" "--------" "------" "-----------"
+    printf "  %-22s %-10s %-12s %s\n" "COMMAND" "CATEGORY" "STATUS" "DESCRIPTION"
+    printf "  %-22s %-10s %-12s %s\n" "-------" "--------" "------" "-----------"
 
     while IFS=: read -r src_path cmd_name category desc || [ -n "$src_path" ]; do
         [[ "$src_path" =~ ^#.*$ ]] && continue
@@ -520,7 +552,7 @@ cmd_list() {
             fi
         fi
 
-        printf "  \033[1m%-16s\033[0m %-10s %-12s %s\n" "$cmd_name" "$category" "$status" "$desc"
+        printf "  \033[1m%-22s\033[0m %-10s %-12s %s\n" "$cmd_name" "$category" "$status" "$desc"
     done < "$tmp_m"
 
     rm -f "$tmp_m"
@@ -599,8 +631,8 @@ cmd_sync() {
     fi
 
     log_head "Synchronizing utilities in $BIN_DIR (Category: $category, Scope: $scope)..."
-    printf "  \033[1m%-16s %-10s %-12s %s\033[0m\n" "COMMAND" "CATEGORY" "STATUS" "DESCRIPTION"
-    printf "  %-16s %-10s %-12s %s\n" "-------" "--------" "------" "-----------"
+    printf "  \033[1m%-22s %-10s %-12s %s\033[0m\n" "COMMAND" "CATEGORY" "STATUS" "DESCRIPTION"
+    printf "  %-22s %-10s %-12s %s\n" "-------" "--------" "------" "-----------"
 
     local count_installed=0
     local count_updated=0
@@ -650,7 +682,7 @@ cmd_sync() {
             count_unchanged=$((count_unchanged + 1))
         fi
 
-        printf "  \033[1m%-16s\033[0m %-10s %-12s %s\n" "$cmd_name" "$script_cat" "$item_status" "$desc"
+        printf "  \033[1m%-22s\033[0m %-10s %-12s %s\n" "$cmd_name" "$script_cat" "$item_status" "$desc"
 
         # Install Man Page & Shell Completions
         install_man_and_completions "$cmd_name"
@@ -711,7 +743,7 @@ cmd_sync() {
     else
         count_unchanged=$((count_unchanged + 1))
     fi
-    printf "  \033[1m%-16s\033[0m %-10s %-12s %s\n" "scripts" "manager" "$scripts_status" "Unified manager for the nada.mu personal utilities ecosystem"
+    printf "  \033[1m%-22s\033[0m %-10s %-12s %s\n" "scripts" "manager" "$scripts_status" "Unified manager for the nada.mu personal utilities ecosystem"
 
     # Check for Orphaned/Deprecated scripts
     local deprecated_to_check=()
