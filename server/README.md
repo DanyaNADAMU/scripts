@@ -102,16 +102,42 @@ Generates and rotates personal LanguageTool API tokens for Authentik users, upda
 * **Offline UI:** Dracula/GitHub Dark themed UI with embedded SVGs, quick-copy buttons (`Copied!`), confirmation dialogs, and Obsidian setup steps.
 * **Monitoring:** Provides `GET /healthz` endpoint returning `200 OK` for HAProxy health checks without authentication.
 
+#### Architectural Modes
+* **Mode A: Stateless / File-only (Default):**
+  LanguageTool reads user credentials from `users.txt` via `passwortLoginAccessListPath`. In `config.properties`, database directives (`db*`) are commented out. The portal operates strictly on `users.txt` with zero external dependencies.
+* **Mode B: Stateful / PostgreSQL Server-Side Dictionaries:**
+  When LanguageTool has PostgreSQL configured (`dbDriver=org.postgresql.Driver`, `dbUrl=...`), it checks custom dictionaries via `SELECT id FROM users WHERE api_key = ?`.
+  Pass `--db-url` (or set `LT_DB_URL`) to enable automatic dual synchronization:
+  ```bash
+  languagetool-portal --db-url "postgresql://lt:secret@127.0.0.1:5432/languagetool"
+  ```
+  The portal executes:
+  ```sql
+  INSERT INTO users (user_name, api_key)
+  VALUES ('username', 'token')
+  ON CONFLICT (user_name) DO UPDATE SET api_key = EXCLUDED.api_key;
+  ```
+  Supports Python `psycopg`, `psycopg2`, or the native `psql` CLI seamlessly.
+
+#### Operational Hardening
+* **Pre-flight File Initialization:** Automatically creates `users.txt` with `0664` permissions on startup and service install, preventing LanguageTool container crashes when `passwortLoginAccessListPath` points to a file that does not yet exist.
+* **Enforced Permissions (`0664`):** Guaranteed `0664` permissions on every write (both atomic and in-place) so Podman container namespaces never encounter `Permission denied`.
+* **Atomic `os.replace` within `data/`:** Temporary files are strictly created inside the target directory, preventing cross-device link errors (`EXDEV`).
+* **Input Sanitization:** Email logins from Authentik (`user@domain.com`) are automatically normalized (`user.domain.com`), and all control characters, colons (`:`), and newlines are stripped.
+
 #### Usage
 
 ```bash
-# Run interactively (default: 127.0.0.1:8012, users file: ~/stacks/languagetool/data/users.txt)
+# Run interactively in default Stateless mode (127.0.0.1:8012, users file: ~/stacks/languagetool/data/users.txt)
 languagetool-portal
+
+# Run with PostgreSQL stateful synchronization
+languagetool-portal --db-url "postgresql://user:pass@127.0.0.1:5432/languagetool"
 
 # Run as unprivileged user (e.g. 'apps') with custom path
 languagetool-portal --users-file /home/apps/stacks/languagetool/data/users.txt
 
-# Check HTTP health and systemd status
+# Check HTTP health, users.txt permissions (0664), DB sync, and systemd status
 languagetool-portal --status
 
 # Install and start as a systemd user service (for current user, e.g. apps)

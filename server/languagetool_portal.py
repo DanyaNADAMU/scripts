@@ -4,7 +4,7 @@ Script:      languagetool_portal.py
 Category:    server
 Description: Self-service token portal for LanguageTool with Authentik forward auth.
 Target:      Linux server (standalone or reverse-proxied behind HAProxy/Authentik)
-Requires:    python >= 3.10 (standard library only)
+Requires:    python >= 3.10 (standard library only; optional psycopg/psycopg2/psql for DB mode)
 Usage:       languagetool-portal [options]
 """
 from __future__ import annotations
@@ -45,8 +45,16 @@ DEFAULT_IN_PLACE = os.environ.get("LT_IN_PLACE", "false").lower() in (
     "on",
 )
 
+# Optional PostgreSQL parameters for stateful server dictionaries
+DEFAULT_DB_URL = os.environ.get("LT_DB_URL") or os.environ.get("DATABASE_URL")
+DEFAULT_DB_HOST = os.environ.get("LT_DB_HOST") or os.environ.get("PGHOST")
+DEFAULT_DB_PORT = int(os.environ.get("LT_DB_PORT") or os.environ.get("PGPORT") or 5432)
+DEFAULT_DB_NAME = os.environ.get("LT_DB_NAME") or os.environ.get("PGDATABASE")
+DEFAULT_DB_USER = os.environ.get("LT_DB_USER") or os.environ.get("PGUSER")
+DEFAULT_DB_PASSWORD = os.environ.get("LT_DB_PASSWORD") or os.environ.get("PGPASSWORD")
+
 SERVICE_NAME = "languagetool-portal"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,8 +68,226 @@ _process_lock = threading.Lock()
 
 
 # ==============================================================================
+# Optional PostgreSQL Database Synchronization
+# ==============================================================================
+class DatabaseSync:
+    """Handles optional PostgreSQL synchronization for LanguageTool server-side dictionaries."""
+
+    def __init__(
+        self,
+        db_url: str | None = None,
+        host: str | None = None,
+        port: int = 5432,
+        dbname: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        self.db_url = db_url or DEFAULT_DB_URL
+        self.host = host or DEFAULT_DB_HOST
+        self.port = port or DEFAULT_DB_PORT
+        self.dbname = dbname or DEFAULT_DB_NAME
+        self.user = user or DEFAULT_DB_USER
+        self.password = password or DEFAULT_DB_PASSWORD
+
+        self.enabled = bool(self.db_url or (self.host and self.dbname))
+        self._driver = self._detect_driver() if self.enabled else None
+
+    def _detect_driver(self) -> str:
+        try:
+            import psycopg  # noqa: F401
+            return "psycopg"
+        except ImportError:
+            pass
+        try:
+            import psycopg2  # noqa: F401
+            return "psycopg2"
+        except ImportError:
+            pass
+        if shutil.which("psql"):
+            return "psql"
+        return "none"
+
+    def _get_psql_cmd(self) -> list[str]:
+        cmd = ["psql"]
+        if self.db_url:
+            cmd.append(self.db_url)
+        else:
+            if self.host:
+                cmd.extend(["-h", self.host])
+            if self.port:
+                cmd.extend(["-p", str(self.port)])
+            if self.user:
+                cmd.extend(["-U", self.user])
+            if self.dbname:
+                cmd.extend(["-d", self.dbname])
+        return cmd
+
+    def _get_psql_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self.password:
+            env["PGPASSWORD"] = self.password
+        return env
+
+    def test_connection(self) -> tuple[bool, str]:
+        if not self.enabled:
+            return False, "Disabled (Stateless / file-only mode)"
+        if self._driver == "none":
+            return False, "Neither python psycopg/psycopg2 nor 'psql' CLI found"
+
+        if self._driver in ("psycopg", "psycopg2"):
+            try:
+                mod = __import__(self._driver)
+                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
+                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
+                )
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1;")
+                conn.close()
+                return True, f"Connected via {self._driver}"
+            except Exception as e:
+                return False, str(e)
+        elif self._driver == "psql":
+            cmd = self._get_psql_cmd() + ["-t", "-A", "-c", "SELECT 1;"]
+            try:
+                res = subprocess.run(
+                    cmd,
+                    env=self._get_psql_env(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    return True, "Connected via psql CLI"
+                return False, res.stderr.strip() or "psql connection failed"
+            except Exception as e:
+                return False, str(e)
+        return False, "Unknown driver"
+
+    def get_token(self, username: str) -> str | None:
+        """Retrieves existing API token from PostgreSQL if present."""
+        if not self.enabled or self._driver == "none":
+            return None
+        sql = "SELECT api_key FROM users WHERE user_name = %s LIMIT 1;"
+        if self._driver in ("psycopg", "psycopg2"):
+            try:
+                mod = __import__(self._driver)
+                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
+                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
+                )
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, (username,))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            return str(row[0]).strip()
+                conn.close()
+            except Exception as e:
+                logger.warning("PostgreSQL get_token query failed for %s: %s", username, e)
+        elif self._driver == "psql":
+            cmd = self._get_psql_cmd() + [
+                "-t", "-A",
+                "-v", "ON_ERROR_STOP=1",
+                "-v", f"uname={username}",
+                "-c", "SELECT api_key FROM users WHERE user_name = :'uname' LIMIT 1;",
+            ]
+            try:
+                res = subprocess.run(
+                    cmd,
+                    env=self._get_psql_env(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    return res.stdout.strip()
+            except Exception as e:
+                logger.warning("psql get_token query failed for %s: %s", username, e)
+        return None
+
+    def upsert_token(self, username: str, token: str) -> bool:
+        """Inserts or updates API token into PostgreSQL users table."""
+        if not self.enabled:
+            return True
+        if self._driver == "none":
+            logger.warning("PostgreSQL sync is configured but no driver ('psycopg', 'psycopg2', or 'psql') is installed.")
+            return False
+
+        sql = """
+        INSERT INTO users (user_name, api_key)
+        VALUES (%s, %s)
+        ON CONFLICT (user_name) DO UPDATE SET api_key = EXCLUDED.api_key;
+        """
+        if self._driver in ("psycopg", "psycopg2"):
+            try:
+                mod = __import__(self._driver)
+                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
+                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
+                )
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, (username, token))
+                conn.close()
+                logger.info("Synced token for '%s' into PostgreSQL database", username)
+                return True
+            except Exception as e:
+                logger.error("Failed to sync token for '%s' to PostgreSQL: %s", username, e)
+                return False
+        elif self._driver == "psql":
+            cmd = self._get_psql_cmd() + [
+                "-v", "ON_ERROR_STOP=1",
+                "-v", f"uname={username}",
+                "-v", f"tok={token}",
+                "-c", "INSERT INTO users (user_name, api_key) VALUES (:'uname', :'tok') ON CONFLICT (user_name) DO UPDATE SET api_key = EXCLUDED.api_key;",
+            ]
+            try:
+                res = subprocess.run(
+                    cmd,
+                    env=self._get_psql_env(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=8,
+                )
+                if res.returncode == 0:
+                    logger.info("Synced token for '%s' into PostgreSQL database via psql", username)
+                    return True
+                logger.error("Failed to sync token for '%s' via psql: %s", username, res.stderr.strip())
+                return False
+            except Exception as e:
+                logger.error("psql execution error: %s", e)
+                return False
+        return False
+
+
+# ==============================================================================
 # File Operations & Concurrency
 # ==============================================================================
+def init_users_file(users_file: str) -> None:
+    """Pre-flight check: ensures users.txt and directory exist with 0664 permissions.
+
+    LanguageTool crashes on container startup if passwortLoginAccessListPath
+    points to a non-existent file. This function guarantees the file exists
+    with read permissions for container processes before service starts.
+    """
+    abs_path = os.path.abspath(users_file)
+    dir_name = os.path.dirname(abs_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True, mode=0o775)
+
+    if not os.path.exists(abs_path):
+        with open(abs_path, "a", encoding="utf-8"):
+            pass
+        logger.info("Pre-flight: Created empty users file at %s", abs_path)
+
+    try:
+        os.chmod(abs_path, 0o664)
+    except OSError as e:
+        logger.warning("Pre-flight: Could not set 0664 on %s: %s", abs_path, e)
+
+
 @contextmanager
 def file_lock_context(users_file: str) -> Iterator[None]:
     """Acquires a process-level mutex and filesystem-level advisory flock.
@@ -72,11 +298,11 @@ def file_lock_context(users_file: str) -> Iterator[None]:
     abs_path = os.path.abspath(users_file)
     dir_name = os.path.dirname(abs_path)
     if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+        os.makedirs(dir_name, exist_ok=True, mode=0o775)
     lock_path = abs_path + ".lock"
 
     with _process_lock:
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o664)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
@@ -87,24 +313,30 @@ def file_lock_context(users_file: str) -> Iterator[None]:
             os.close(lock_fd)
 
 
-def validate_username(raw_username: str | None) -> tuple[bool, str]:
+def sanitize_username(raw_username: str | None) -> tuple[bool, str]:
     """Validates and sanitizes Authentik username input.
 
-    Rejects empty values, newlines, colons, null bytes, and non-printable
-    characters to prevent file format injection into users.txt.
+    - Replaces '@' with '.' so email logins remain unique without breaking LanguageTool.
+    - Strips illegal characters: only [a-zA-Z0-9._-] are preserved.
+    - Strictly prevents users.txt format corruption from colons, newlines, or control characters.
     """
     if not raw_username:
         return False, "Username is empty"
     username = raw_username.strip()
     if not username:
         return False, "Username cannot be whitespace only"
-    if len(username) > 256:
-        return False, "Username exceeds maximum length (256 characters)"
-    if any(c in username for c in (":", "\n", "\r", "\0")):
-        return False, "Username contains forbidden characters (':', newlines, or null bytes)"
-    if any(ord(c) < 32 or ord(c) == 127 for c in username):
-        return False, "Username contains control characters"
-    return True, username
+
+    # Convert email addresses cleanly: user@domain.com -> user.domain.com
+    username = username.replace("@", ".")
+
+    # Strictly strip all illegal characters to prevent file parser injection
+    clean_username = re.sub(r"[^a-zA-Z0-9._-]", "", username)
+    if not clean_username:
+        return False, "Username contains no valid alphanumeric characters"
+    if len(clean_username) > 128:
+        clean_username = clean_username[:128]
+
+    return True, clean_username
 
 
 def _read_token_unlocked(users_file: str, username: str) -> str | None:
@@ -133,22 +365,20 @@ def _save_token_unlocked(
     """Saves user token into users.txt.
 
     Preserves comments and records of other users. Supports atomic replacement
-    (recommended when directory is mounted) or in-place overwrite (for single-file
-    bind-mounts where inode preservation is mandatory).
+    (strictly within the same data/ directory to prevent cross-device link errors)
+    or in-place overwrite (for single-file container bind-mounts).
+    Always explicitly enforces 0664 permissions for Podman/Docker accessibility.
     """
     abs_path = os.path.abspath(users_file)
     dir_name = os.path.dirname(abs_path)
     if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+        os.makedirs(dir_name, exist_ok=True, mode=0o775)
 
     lines: list[str] = []
     found = False
-    orig_mode = 0o644
 
     if os.path.exists(abs_path):
         try:
-            stat_info = os.stat(abs_path)
-            orig_mode = stat_info.st_mode & 0o777
             with open(abs_path, "r", encoding="utf-8") as f:
                 for line in f:
                     stripped = line.strip()
@@ -177,16 +407,21 @@ def _save_token_unlocked(
             f.truncate()
             f.flush()
             os.fsync(f.fileno())
+        try:
+            os.chmod(abs_path, 0o664)
+        except OSError:
+            pass
     else:
-        # Atomic write: creates temporary file in the same directory and replaces
+        # Atomic write: creates temporary file strictly in the SAME data/ directory
         fd, tmp_path = tempfile.mkstemp(prefix="users-", suffix=".tmp", dir=dir_name)
         try:
             with open(fd, "w", encoding="utf-8") as f:
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())
-            os.chmod(tmp_path, orig_mode)
+            os.chmod(tmp_path, 0o664)
             os.replace(tmp_path, abs_path)
+            os.chmod(abs_path, 0o664)
         except Exception:
             if os.path.exists(tmp_path):
                 try:
@@ -196,23 +431,47 @@ def _save_token_unlocked(
             raise
 
 
-def get_or_create_token(users_file: str, username: str, in_place: bool = False) -> str:
-    """Retrieves existing token or generates and persists a new one."""
+def get_or_create_token(
+    users_file: str,
+    username: str,
+    in_place: bool = False,
+    db: DatabaseSync | None = None,
+) -> str:
+    """Retrieves existing token or generates and persists a new one (syncing DB if configured)."""
     with file_lock_context(users_file):
         token = _read_token_unlocked(users_file, username)
         if token:
+            if db and db.enabled:
+                db.upsert_token(username, token)
             return token
+
+        # If not present in users.txt, check if PostgreSQL already has a token
+        if db and db.enabled:
+            db_token = db.get_token(username)
+            if db_token:
+                _save_token_unlocked(users_file, username, db_token, in_place=in_place)
+                return db_token
+
         new_token = secrets.token_hex(16)
         _save_token_unlocked(users_file, username, new_token, in_place=in_place)
+        if db and db.enabled:
+            db.upsert_token(username, new_token)
         logger.info("Created new API token for user '%s'", username)
         return new_token
 
 
-def regenerate_token(users_file: str, username: str, in_place: bool = False) -> str:
-    """Generates a new token for the user, overwriting previous value."""
+def regenerate_token(
+    users_file: str,
+    username: str,
+    in_place: bool = False,
+    db: DatabaseSync | None = None,
+) -> str:
+    """Generates a new token for the user, overwriting previous value (syncing DB if configured)."""
     with file_lock_context(users_file):
         new_token = secrets.token_hex(16)
         _save_token_unlocked(users_file, username, new_token, in_place=in_place)
+        if db and db.enabled:
+            db.upsert_token(username, new_token)
         logger.info("Regenerated API token for user '%s'", username)
         return new_token
 
@@ -659,7 +918,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.wfile.write(msg)
             return
 
-        valid, user_or_err = validate_username(raw_user)
+        valid, user_or_err = sanitize_username(raw_user)
         if not valid:
             self.send_response(HTTPStatus.BAD_REQUEST)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -673,8 +932,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         users_file: str = getattr(self.server, "users_file", DEFAULT_USERS_FILE)
         server_url: str = getattr(self.server, "server_url", DEFAULT_SERVER_URL)
         in_place: bool = getattr(self.server, "in_place", DEFAULT_IN_PLACE)
+        db: DatabaseSync | None = getattr(self.server, "db", None)
 
-        token = get_or_create_token(users_file, username, in_place=in_place)
+        token = get_or_create_token(users_file, username, in_place=in_place, db=db)
         page_bytes = render_portal_html(username, token, server_url).encode("utf-8")
 
         self.send_response(HTTPStatus.OK)
@@ -703,7 +963,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.wfile.write(msg)
             return
 
-        valid, user_or_err = validate_username(raw_user)
+        valid, user_or_err = sanitize_username(raw_user)
         if not valid:
             self.send_response(HTTPStatus.BAD_REQUEST)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -723,8 +983,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         username = user_or_err
         users_file: str = getattr(self.server, "users_file", DEFAULT_USERS_FILE)
         in_place: bool = getattr(self.server, "in_place", DEFAULT_IN_PLACE)
+        db: DatabaseSync | None = getattr(self.server, "db", None)
 
-        regenerate_token(users_file, username, in_place=in_place)
+        regenerate_token(users_file, username, in_place=in_place, db=db)
 
         # 303 See Other redirect pattern
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -754,6 +1015,7 @@ def generate_systemd_unit(
     users_file: str,
     server_url: str,
     in_place: bool,
+    db_url: str | None = None,
     run_as_user: str | None = None,
 ) -> str:
     """Generates systemd unit file content."""
@@ -766,9 +1028,10 @@ def generate_systemd_unit(
     ]
     if in_place:
         args.append("--in-place")
+    if db_url:
+        args.append(f"--db-url {db_url}")
 
     exec_cmd = " \\\n    ".join(args)
-
     user_directive = f"User={run_as_user}\nGroup={run_as_user}\n" if run_as_user else ""
 
     return f"""[Unit]
@@ -794,12 +1057,16 @@ def setup_systemd_service(
     users_file: str,
     server_url: str,
     in_place: bool,
+    db_url: str | None,
     force_user: bool,
     force_system: bool,
     run_as: str | None,
 ) -> None:
-    """Installs and enables the systemd service."""
-    # Determine binary path
+    """Installs and enables the systemd service (ensuring pre-flight file init)."""
+    # 1. Pre-flight initialization of users.txt
+    init_users_file(users_file)
+
+    # 2. Determine binary path
     bin_path = shutil.which("languagetool-portal")
     if not bin_path:
         bin_path = os.path.abspath(__file__)
@@ -817,7 +1084,7 @@ def setup_systemd_service(
         unit_dir.mkdir(parents=True, exist_ok=True)
         unit_path = unit_dir / f"{SERVICE_NAME}.service"
         unit_content = generate_systemd_unit(
-            bin_path, host, port, users_file, server_url, in_place, run_as_user=None
+            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, run_as_user=None
         )
         unit_path.write_text(unit_content, encoding="utf-8")
         print(f"✓ Installed user service: {unit_path}")
@@ -834,7 +1101,7 @@ def setup_systemd_service(
         unit_dir = Path("/etc/systemd/system")
         unit_path = unit_dir / f"{SERVICE_NAME}.service"
         unit_content = generate_systemd_unit(
-            bin_path, host, port, users_file, server_url, in_place, run_as_user=run_as
+            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, run_as_user=run_as
         )
         unit_path.write_text(unit_content, encoding="utf-8")
         print(f"✓ Installed system service: {unit_path}")
@@ -874,7 +1141,7 @@ def remove_systemd_service(force_user: bool, force_system: bool) -> None:
         subprocess.run(["systemctl", "daemon-reload"], check=False)
 
 
-def check_status(host: str, port: int, users_file: str) -> None:
+def check_status(host: str, port: int, users_file: str, db: DatabaseSync | None = None) -> None:
     """Checks the health and status of the portal."""
     print("=" * 60)
     print(f"LanguageTool Token Portal Status ({host}:{port})")
@@ -912,9 +1179,19 @@ def check_status(host: str, port: int, users_file: str) -> None:
         except Exception as e:
             print(f"  Users File:       \033[1;33m[ERROR]\033[0m {abs_users} ({e})")
     else:
-        print(f"  Users File:       \033[1;33m[NOT CREATED]\033[0m {abs_users} (will be initialized on first user login)")
+        print(f"  Users File:       \033[1;33m[NOT CREATED]\033[0m {abs_users} (Run --setup-service or start portal to init)")
 
-    # 3. Check systemd unit if systemctl available
+    # 3. Check PostgreSQL database sync status
+    if db and db.enabled:
+        ok, msg = db.test_connection()
+        if ok:
+            print(f"  PostgreSQL DB:    \033[1;32m[OK]\033[0m {msg}")
+        else:
+            print(f"  PostgreSQL DB:    \033[1;31m[FAIL]\033[0m {msg}")
+    else:
+        print("  PostgreSQL DB:    \033[1;34m[DISABLED]\033[0m (Stateless file-only mode)")
+
+    # 4. Check systemd unit if systemctl available
     if shutil.which("systemctl"):
         cmd = ["systemctl", "--user", "is-active", f"{SERVICE_NAME}.service"] if os.geteuid() != 0 else ["systemctl", "is-active", f"{SERVICE_NAME}.service"]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -933,12 +1210,21 @@ def parse_arguments() -> argparse.Namespace:
         description="Lightweight self-service token portal for LanguageTool and Authentik forward auth.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
+Architectural Modes:
+  Mode A: Stateless / File-only (Default)
+    Reads and writes tokens directly into users.txt. Zero database configuration or dependencies.
+  Mode B: Stateful / PostgreSQL Server-Side Dictionaries
+    Syncs user API tokens into PostgreSQL table 'users' (INSERT ... ON CONFLICT DO UPDATE)
+    alongside users.txt. Enabled via --db-url or LT_DB_URL / DATABASE_URL.
+
 Environment Variables:
   LT_PORTAL_HOST    Listening host interface (default: 127.0.0.1)
   LT_PORTAL_PORT    Listening port (default: 8012)
   LT_USERS_FILE     Path to LanguageTool users.txt (default: ~/stacks/languagetool/data/users.txt)
   LT_SERVER_URL     Public LanguageTool endpoint URL (default: https://lt.nada.mu/v2)
   LT_IN_PLACE       Write users.txt in-place without replacing inode (true/false)
+  LT_DB_URL         PostgreSQL connection URI (e.g. postgresql://user:pass@host:5432/db)
+  PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD
 
 Docker / Podman Inode Note:
   If mounting users.txt directly into a container (Volume=.../users.txt:/LanguageTool/users.txt:ro,Z),
@@ -976,10 +1262,46 @@ Docker / Podman Inode Note:
         default=DEFAULT_IN_PLACE,
         help="Update users.txt in-place with flock to keep inode unchanged (for single-file bind mounts)",
     )
+
+    # PostgreSQL group
+    db_group = parser.add_argument_group("PostgreSQL Database Options (Optional)")
+    db_group.add_argument(
+        "--db-url",
+        default=DEFAULT_DB_URL,
+        help="PostgreSQL connection URL (e.g. postgresql://user:pass@host:5432/dbname)",
+    )
+    db_group.add_argument(
+        "--db-host",
+        default=DEFAULT_DB_HOST,
+        help="PostgreSQL host (env: PGHOST or LT_DB_HOST)",
+    )
+    db_group.add_argument(
+        "--db-port",
+        type=int,
+        default=DEFAULT_DB_PORT,
+        help=f"PostgreSQL port (default: {DEFAULT_DB_PORT})",
+    )
+    db_group.add_argument(
+        "--db-name",
+        default=DEFAULT_DB_NAME,
+        help="PostgreSQL database name (env: PGDATABASE or LT_DB_NAME)",
+    )
+    db_group.add_argument(
+        "--db-user",
+        default=DEFAULT_DB_USER,
+        help="PostgreSQL username (env: PGUSER or LT_DB_USER)",
+    )
+    db_group.add_argument(
+        "--db-password",
+        default=DEFAULT_DB_PASSWORD,
+        help="PostgreSQL password (env: PGPASSWORD or LT_DB_PASSWORD)",
+    )
+
+    # Service & diagnostics
     parser.add_argument(
         "--setup-service",
         action="store_true",
-        help="Install, enable, and start systemd service",
+        help="Install, enable, and start systemd service (with pre-flight file init)",
     )
     parser.add_argument(
         "--remove-service",
@@ -989,7 +1311,7 @@ Docker / Podman Inode Note:
     parser.add_argument(
         "--status",
         action="store_true",
-        help="Check portal HTTP healthcheck, users file, and systemd status",
+        help="Check portal HTTP healthcheck, users file, database, and systemd status",
     )
     parser.add_argument(
         "--print-service",
@@ -1029,6 +1351,15 @@ def main() -> None:
 
     users_file = os.path.abspath(os.path.expanduser(args.users_file))
 
+    db = DatabaseSync(
+        db_url=args.db_url,
+        host=args.db_host,
+        port=args.db_port,
+        dbname=args.db_name,
+        user=args.db_user,
+        password=args.db_password,
+    )
+
     # Handle service inspection/setup subcommands
     if args.print_service:
         bin_path = shutil.which("languagetool-portal") or os.path.abspath(__file__)
@@ -1039,6 +1370,7 @@ def main() -> None:
             users_file,
             args.server_url,
             args.in_place,
+            db_url=args.db_url if db.enabled else None,
             run_as_user=args.run_as if args.system else None,
         )
         print(unit)
@@ -1051,6 +1383,7 @@ def main() -> None:
             users_file,
             args.server_url,
             args.in_place,
+            args.db_url if db.enabled else None,
             args.user,
             args.system,
             args.run_as,
@@ -1062,8 +1395,11 @@ def main() -> None:
         return
 
     if args.status:
-        check_status(args.host, args.port, users_file)
+        check_status(args.host, args.port, users_file, db=db)
         return
+
+    # Pre-flight initialization of users.txt on server startup
+    init_users_file(users_file)
 
     # Start HTTP server
     server = ThreadingHTTPServer((args.host, args.port), PortalHandler)
@@ -1071,12 +1407,16 @@ def main() -> None:
     server.users_file = users_file  # type: ignore[attr-defined]
     server.server_url = args.server_url  # type: ignore[attr-defined]
     server.in_place = args.in_place  # type: ignore[attr-defined]
+    server.db = db  # type: ignore[attr-defined]
 
-    mode_str = "in-place (preserving inode)" if args.in_place else "atomic (os.replace)"
+    mode_str = "in-place (preserving inode)" if args.in_place else "atomic (os.replace in data dir)"
+    db_str = f"PostgreSQL enabled ({db._driver})" if db.enabled else "Stateless (file-only)"
+
     logger.info("LanguageTool Token Portal v%s starting up", VERSION)
     logger.info("Listening on: http://%s:%d", args.host, args.port)
     logger.info("Users file:   %s", users_file)
     logger.info("Write mode:   %s", mode_str)
+    logger.info("Database:     %s", db_str)
     logger.info("Endpoint URL: %s", args.server_url)
 
     try:

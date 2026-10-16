@@ -8,9 +8,15 @@ _languagetool_portal() {
         '(-f --users-file)'{-f,--users-file}'[Path to LanguageTool users.txt]:users file:_files' \
         '(-u --server-url)'{-u,--server-url}'[Public LanguageTool URL for Obsidian]:url:' \
         '--in-place[Write users.txt in-place with flock to preserve inode]' \
-        '--setup-service[Install, enable, and start systemd service]' \
+        '--db-url[PostgreSQL connection URI]:url:' \
+        '--db-host[PostgreSQL host]:host:' \
+        '--db-port[PostgreSQL port]:port:' \
+        '--db-name[PostgreSQL database name]:dbname:' \
+        '--db-user[PostgreSQL user]:user:_users' \
+        '--db-password[PostgreSQL password]:password:' \
+        '--setup-service[Install, enable, and start systemd service (with pre-flight init)]' \
         '--remove-service[Disable, stop, and remove systemd service]' \
-        '--status[Check portal HTTP healthcheck and systemd status]' \
+        '--status[Check portal HTTP healthcheck, database, and systemd status]' \
         '--print-service[Print systemd unit file content to stdout]' \
         '--user[Force user-level systemd service (~/.config/systemd/user)]' \
         '--system[Force system-level service (/etc/systemd/system)]' \

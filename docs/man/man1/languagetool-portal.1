@@ -80,14 +80,32 @@ Public LanguageTool API endpoint shown in the portal UI (default: \fBhttps://lt.
 .B \-\-in-place
 Modifies \fBusers.txt\fR in-place using \fBfcntl.flock\fR, keeping the file inode unchanged for container single-file mounts.
 .TP
+.BR \-\-db-url " \fIURL\fR"
+PostgreSQL connection URI (e.g. \fBpostgresql://user:pass@host:5432/dbname\fR). Enables Mode B (server-side dictionaries sync into the \fBusers\fR table).
+.TP
+.BR \-\-db-host " \fIHOST\fR"
+PostgreSQL server hostname.
+.TP
+.BR \-\-db-port " \fIPORT\fR"
+PostgreSQL server port (default: \fB5432\fR).
+.TP
+.BR \-\-db-name " \fIDBNAME\fR"
+PostgreSQL database name.
+.TP
+.BR \-\-db-user " \fIUSER\fR"
+PostgreSQL username.
+.TP
+.BR \-\-db-password " \fIPASS\fR"
+PostgreSQL password.
+.TP
 .B \-\-setup-service
-Installs, enables, and starts the systemd service (\fBlanguagetool-portal.service\fR). Defaults to user service if unprivileged, or system service if root.
+Installs, enables, and starts the systemd service (\fBlanguagetool-portal.service\fR) with pre-flight initialization of \fBusers.txt\fR (permissions 0664). Defaults to user service if unprivileged, or system service if root.
 .TP
 .B \-\-remove-service
 Stops, disables, and deletes the systemd service.
 .TP
 .B \-\-status
-Performs an HTTP healthcheck against the portal, checks \fBusers.txt\fR stats, and inspects systemd service state.
+Performs an HTTP healthcheck against the portal, checks \fBusers.txt\fR stats and permissions (0664), tests PostgreSQL connection (if enabled), and inspects systemd service state.
 .TP
 .B \-\-print-service
 Prints the systemd unit file content to stdout and exits.
@@ -119,6 +137,12 @@ Public LanguageTool endpoint (default: \fBhttps://lt.nada.mu/v2\fR).
 .TP
 .B LT_IN_PLACE
 Enable in-place writing when set to \fBtrue\fR or \fB1\fR.
+.TP
+.B LT_DB_URL ", " DATABASE_URL
+PostgreSQL connection string for stateful dictionary synchronization.
+.TP
+.B PGHOST ", " PGPORT ", " PGDATABASE ", " PGUSER ", " PGPASSWORD
+Standard PostgreSQL client environment variables.
 .SH ENDPOINTS
 .TP
 .B GET /
