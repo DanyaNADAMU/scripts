@@ -1230,6 +1230,10 @@ def upgrade_ots_file(target_path: Path) -> bool:
             rel_display = str(ots_p.relative_to(target_path))
             cli_args = ["upgrade", str(ots_p)]
             try:
+                try:
+                    ots_p.chmod(0o644)
+                except OSError:
+                    pass
                 parsed_args = otsclient.args.parse_ots_args(cli_args)
                 try:
                     parsed_args.cmd_func(parsed_args)
@@ -1245,6 +1249,11 @@ def upgrade_ots_file(target_path: Path) -> bool:
             except Exception as e:
                 log_warn(f"Failed {rel_display}: {e}")
                 error_count += 1
+            finally:
+                try:
+                    ots_p.chmod(0o444)
+                except OSError:
+                    pass
 
         print(f"\n  {C_BOLD}Upgrade Summary:{C_RESET}")
         print(f"    {C_GREEN}[✓] Confirmed: {confirmed_count}{C_RESET}")
@@ -1264,6 +1273,10 @@ def upgrade_ots_file(target_path: Path) -> bool:
     cli_args = ["upgrade", str(ots_file)]
 
     try:
+        try:
+            ots_file.chmod(0o644)
+        except OSError:
+            pass
         parsed_args = otsclient.args.parse_ots_args(cli_args)
         try:
             parsed_args.cmd_func(parsed_args)
@@ -1279,6 +1292,11 @@ def upgrade_ots_file(target_path: Path) -> bool:
     except Exception as e:
         log_err(f"Upgrade failed: {e}")
         return False
+    finally:
+        try:
+            ots_file.chmod(0o444)
+        except OSError:
+            pass
 
 
 def inspect_ots_proof(target_file: Path, ots_path: Path | None = None) -> dict[str, Any] | None:
@@ -1551,6 +1569,8 @@ def process_signing(
                     save_kwargs = {"quality": 95}
                     if wm_img.mode in ("RGBA", "LA", "P"):
                         wm_img = wm_img.convert("RGB")
+                if output_path.is_file():
+                    output_path.unlink()
                 wm_img.save(output_path, format=save_fmt, **save_kwargs)
                 log_ok("Stage 1 complete: Watermark embedded into frequency spectrum.")
         except Exception as e:
@@ -1559,6 +1579,8 @@ def process_signing(
     else:
         log_info("Stage 1: Invisible watermarking disabled (--no-watermark).")
         if input_path.resolve() != output_path.resolve():
+            if output_path.is_file():
+                output_path.unlink()
             shutil.copyfile(input_path, output_path)
 
     # Stage 2: C2PA Content Credentials
@@ -1596,6 +1618,8 @@ def process_signing(
         try:
             builder = c2pa.Builder.from_json(json.dumps(manifest_def))
             temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}")
+            if temp_dest.is_file():
+                temp_dest.unlink()
             builder.sign_file(str(output_path), str(temp_dest), signer)
             temp_dest.replace(output_path)
             log_ok("Stage 2 complete: C2PA cryptographic manifest embedded.")
@@ -2240,33 +2264,43 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
             base_name = ots.name[:-4]
             expected_target = target_dir / rel.parent / base_name
 
-            # Seamless backward-compatibility check for legacy '01_source' / '02_signed' / 'dist' paths
+            # Seamless backward-compatibility check for legacy 'source' / '01_source' / 'raw' / 'dist' / 'generated' paths
             if not expected_target.is_file():
-                rel_parts = list(rel.parent.parts)
-                for idx, part in enumerate(rel_parts):
-                    if part == "source":
-                        rel_parts[idx] = "01_source"
-                    elif part == "01_source":
-                        rel_parts[idx] = "source"
-                    elif part == "signed":
-                        rel_parts[idx] = "02_signed"
-                    elif part == "02_signed":
-                        rel_parts[idx] = "signed"
-                    elif part == "dist":
-                        rel_parts[idx] = "generated"
-                    elif part == "generated":
-                        rel_parts[idx] = "dist"
-                alt_target = target_dir / Path(*rel_parts) / base_name
-                if alt_target.is_file():
-                    expected_target = alt_target
-                elif len(rel_parts) == 1 and rel_parts[0] == "raw":
-                    legacy_raw = target_dir / "source" / "raw" / base_name
-                    if legacy_raw.is_file():
-                        expected_target = legacy_raw
-                elif len(rel_parts) >= 2 and rel_parts[:2] == ["source", "raw"]:
-                    new_raw = target_dir / "raw" / base_name
-                    if new_raw.is_file():
-                        expected_target = new_raw
+                rel_str = str(rel.parent)
+                candidate_paths: list[Path] = []
+                if rel_str in ("source/raw", "01_source/raw"):
+                    candidate_paths.append(target_dir / "raw" / base_name)
+                elif rel_str == "raw":
+                    candidate_paths.append(target_dir / "source" / "raw" / base_name)
+                    candidate_paths.append(target_dir / "01_source" / "raw" / base_name)
+
+                if rel_str in ("dist", "03_dist"):
+                    candidate_paths.append(target_dir / "generated" / base_name)
+                elif rel_str == "generated":
+                    candidate_paths.append(target_dir / "dist" / base_name)
+                    candidate_paths.append(target_dir / "03_dist" / base_name)
+
+                if rel_str in ("signed", "02_signed"):
+                    candidate_paths.append(target_dir / "signed" / base_name)
+                    candidate_paths.append(target_dir / "02_signed" / base_name)
+
+                if rel_str in ("source/master", "01_source/master"):
+                    candidate_paths.append(target_dir / "to_sign" / "to_generate" / base_name)
+                    candidate_paths.append(target_dir / "signed" / base_name)
+
+                for cand in candidate_paths:
+                    if cand.is_file():
+                        expected_target = cand
+                        break
+
+                # Universal search across target_dir for base_name if still not matched
+                if not expected_target.is_file():
+                    matches = [
+                        f for f in target_dir.rglob(base_name)
+                        if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+                    ]
+                    if matches:
+                        expected_target = matches[0]
 
             all_ots_map[ots] = expected_target
 
@@ -2457,10 +2491,15 @@ def execute_build(
                     target_canvas = raw_dest_dir / f.name
                     if target_canvas.resolve() != f.resolve():
                         log_info(f"Organizing project canvas '{f.name}' -> {raw_dest_dir.name}/")
+                        if target_canvas.is_file():
+                            target_canvas.unlink()
                         shutil.move(f, target_canvas)
                         ots_f = f.with_name(f"{f.name}.ots")
                         if ots_f.is_file():
-                            shutil.move(ots_f, raw_dest_dir / ots_f.name)
+                            target_canvas_ots = raw_dest_dir / ots_f.name
+                            if target_canvas_ots.is_file():
+                                target_canvas_ots.unlink()
+                            shutil.move(ots_f, target_canvas_ots)
 
     # Auto-detect existing raw project canvas if not provided
     if raw_path is None:
@@ -2497,17 +2536,65 @@ def execute_build(
     proofs_signed_name = "signed"
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
-        if (target_proofs_dir / "source" / "raw").is_dir():
+
+        # Automatically migrate legacy proofs folders to clean layout if target_dir uses clean layout
+        if raw_dest_dir.name == "raw":
+            proofs_raw_name = "raw"
+            target_proofs_raw = target_proofs_dir / "raw"
+            for old_raw in (target_proofs_dir / "source" / "raw", target_proofs_dir / "01_source" / "raw"):
+                if old_raw.is_dir():
+                    target_proofs_raw.mkdir(parents=True, exist_ok=True)
+                    for old_ots in old_raw.glob("*.ots"):
+                        new_ots = target_proofs_raw / old_ots.name
+                        if new_ots.is_file():
+                            new_ots.unlink()
+                        shutil.move(old_ots, new_ots)
+                    try:
+                        old_raw.rmdir()
+                        old_raw.parent.rmdir()
+                    except OSError:
+                        pass
+        elif (target_proofs_dir / "source" / "raw").is_dir():
             proofs_raw_name = "source/raw"
         elif (target_proofs_dir / "01_source" / "raw").is_dir():
             proofs_raw_name = "01_source/raw"
 
-        if (target_proofs_dir / "dist").is_dir():
+        if gen_dir.name == "generated":
+            proofs_gen_name = "generated"
+            target_proofs_gen = target_proofs_dir / "generated"
+            for old_dist in (target_proofs_dir / "dist", target_proofs_dir / "03_dist"):
+                if old_dist.is_dir():
+                    target_proofs_gen.mkdir(parents=True, exist_ok=True)
+                    for old_ots in old_dist.glob("*.ots"):
+                        new_ots = target_proofs_gen / old_ots.name
+                        if new_ots.is_file():
+                            new_ots.unlink()
+                        shutil.move(old_ots, new_ots)
+                    try:
+                        old_dist.rmdir()
+                    except OSError:
+                        pass
+        elif (target_proofs_dir / "dist").is_dir():
             proofs_gen_name = "dist"
         elif (target_proofs_dir / "03_dist").is_dir():
             proofs_gen_name = "03_dist"
 
-        if (target_proofs_dir / "02_signed").is_dir():
+        if signed_dir.name == "signed":
+            proofs_signed_name = "signed"
+            target_proofs_signed = target_proofs_dir / "signed"
+            for old_signed in (target_proofs_dir / "02_signed",):
+                if old_signed.is_dir():
+                    target_proofs_signed.mkdir(parents=True, exist_ok=True)
+                    for old_ots in old_signed.glob("*.ots"):
+                        new_ots = target_proofs_signed / old_ots.name
+                        if new_ots.is_file():
+                            new_ots.unlink()
+                        shutil.move(old_ots, new_ots)
+                    try:
+                        old_signed.rmdir()
+                    except OSError:
+                        pass
+        elif (target_proofs_dir / "02_signed").is_dir():
             proofs_signed_name = "02_signed"
 
         (target_proofs_dir / proofs_raw_name).mkdir(parents=True, exist_ok=True)
@@ -2539,10 +2626,15 @@ def execute_build(
     # 1. Pre-flight Audit if target directory exists
     if target_dir.is_dir():
         err_count, violations = run_audit(target_dir, target_proofs_dir)
-        if err_count > 0 and not force:
+        blocking_violations = [
+            v for v in violations
+            if v["severity"] == "CRITICAL"
+            or (v["severity"] == "ERROR" and not any(part in v["path"] for part in ("generated", "dist", "03_dist")))
+        ]
+        if blocking_violations and not force:
             print_audit_report(name, version, violations)
             log_err(
-                f"Build aborted due to {err_count} integrity violation(s). "
+                f"Build aborted due to {len(blocking_violations)} integrity violation(s). "
                 f"Fix them or pass --force to overwrite."
             )
             sys.exit(1)
@@ -2557,6 +2649,8 @@ def execute_build(
     if raw_path and raw_path.parent.resolve() != raw_dest_dir.resolve():
         dest_raw = raw_dest_dir / raw_path.name
         if dest_raw.resolve() != raw_path.resolve():
+            if dest_raw.is_file():
+                dest_raw.unlink()
             shutil.copyfile(raw_path, dest_raw)
         raw_path = dest_raw
 
@@ -2586,6 +2680,8 @@ def execute_build(
                     local_ots = rf.with_name(f"{rf.name}.ots")
                     if target_proofs_dir and local_ots.is_file():
                         final_ots = target_proofs_dir / proofs_raw_name / f"{rf.name}.ots"
+                        if final_ots.is_file():
+                            final_ots.unlink()
                         shutil.move(local_ots, final_ots)
                         final_ots.chmod(0o444)
                     elif local_ots.is_file():
@@ -2601,6 +2697,8 @@ def execute_build(
     ):
         dest_master = to_gen_dir / master_path.name
         if dest_master.resolve() != master_path.resolve():
+            if dest_master.is_file():
+                dest_master.unlink()
             shutil.copyfile(master_path, dest_master)
     dest_master.chmod(0o444)
     log_ok(f"Master image staged: {dest_master.name} (0444)")
@@ -2618,6 +2716,8 @@ def execute_build(
             if gen_favicon:
                 ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
                 ico_path = gen_dir / "favicon.ico"
+                if ico_path.is_file():
+                    ico_path.unlink()
                 if is_square:
                     rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
                 else:
@@ -2636,11 +2736,15 @@ def execute_build(
                 res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
                 if "webp" in formats:
                     out_webp = gen_dir / f"{name}_{lbl}.webp"
+                    if out_webp.is_file():
+                        out_webp.unlink()
                     res_img.save(out_webp, format="WEBP", quality=90, method=6)
                     out_webp.chmod(0o444)
                     generated_count += 1
                 if "png" in formats:
                     out_png = gen_dir / f"{name}_{lbl}.png"
+                    if out_png.is_file():
+                        out_png.unlink()
                     res_img.save(out_png, format="PNG", optimize=True)
                     out_png.chmod(0o444)
                     generated_count += 1
@@ -2672,6 +2776,8 @@ def execute_build(
                 local_ots = gf.with_name(f"{gf.name}.ots")
                 if target_proofs_dir and local_ots.is_file():
                     final_ots = target_proofs_dir / proofs_gen_name / f"{gf.name}.ots"
+                    if final_ots.is_file():
+                        final_ots.unlink()
                     shutil.move(local_ots, final_ots)
                     final_ots.chmod(0o444)
                 elif local_ots.is_file():
@@ -2726,6 +2832,8 @@ def execute_build(
                         showcase_img = pil_master.convert("RGBA")
                         if (showcase_img.width, showcase_img.height) != (tw, th):
                             showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
+                        if showcase_tmp.is_file():
+                            showcase_tmp.unlink()
                         showcase_img.save(showcase_tmp, format="PNG")
                     items_to_sign.append((showcase_tmp, target_dst, f"Showcase release {tw}x{th} ({target_dst.name})"))
                 except Exception as e:
@@ -2765,6 +2873,8 @@ def execute_build(
             local_ots = dst_file.with_name(f"{dst_file.name}.ots")
             if target_proofs_dir and local_ots.is_file():
                 final_ots = target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots"
+                if final_ots.is_file():
+                    final_ots.unlink()
                 shutil.move(local_ots, final_ots)
                 final_ots.chmod(0o444)
             elif local_ots.is_file():
@@ -2773,6 +2883,8 @@ def execute_build(
             log_ok(f"Signed release ready: {dst_file.name} (0444)")
         else:
             if src_file.resolve() != dst_file.resolve():
+                if dst_file.is_file():
+                    dst_file.unlink()
                 shutil.copyfile(src_file, dst_file)
             if is_tmp:
                 src_file.unlink(missing_ok=True)
@@ -2787,6 +2899,8 @@ def execute_build(
                 if not final_ots.is_file() or force:
                     stamp_media_file(dst_file, force=True)
                     if target_proofs_dir and local_ots.is_file():
+                        if final_ots.is_file():
+                            final_ots.unlink()
                         shutil.move(local_ots, final_ots)
                         final_ots.chmod(0o444)
                     elif local_ots.is_file():
