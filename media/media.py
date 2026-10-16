@@ -305,8 +305,18 @@ def embed_dwt_watermark(
     y_wm = y_wm[:orig_h, :orig_w]
     y_wm = np.clip(y_wm, 0, 255).astype(np.uint8)
 
-    res_img = Image.merge("YCbCr", (Image.fromarray(y_wm), Cb, Cr)).convert("RGB")
+    y_img = Image.fromarray(y_wm)
+    if y_img.size != (orig_w, orig_h):
+        y_img = y_img.resize((orig_w, orig_h), Image.Resampling.LANCZOS)
+    if Cb.size != (orig_w, orig_h):
+        Cb = Cb.resize((orig_w, orig_h), Image.Resampling.LANCZOS)
+    if Cr.size != (orig_w, orig_h):
+        Cr = Cr.resize((orig_w, orig_h), Image.Resampling.LANCZOS)
+
+    res_img = Image.merge("YCbCr", (y_img, Cb, Cr)).convert("RGB")
     if has_alpha and alpha:
+        if alpha.size != res_img.size:
+            alpha = alpha.resize(res_img.size, Image.Resampling.LANCZOS)
         res_img.putalpha(alpha)
     return res_img
 
@@ -545,7 +555,7 @@ def generate_c2pa_certs_for_public_key(
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=1095))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
@@ -553,8 +563,8 @@ def generate_c2pa_certs_for_public_key(
                 key_encipherment=False,
                 data_encipherment=False,
                 key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
+                key_cert_sign=True,
+                crl_sign=True,
                 encipher_only=False,
                 decipher_only=False,
             ),
@@ -718,6 +728,187 @@ def ssh_agent_sign(sock_path: Path, key_blob: bytes, key_type: str, data: bytes)
         return sig_data
     else:
         return sig_data
+
+
+def _encode_der_length(length: int) -> bytes:
+    if length < 128:
+        return bytes([length])
+    len_bytes = []
+    while length > 0:
+        len_bytes.append(length & 0xFF)
+        length >>= 8
+    len_bytes.reverse()
+    return bytes([0x80 | len(len_bytes)] + len_bytes)
+
+
+def _encode_der_sequence(content: bytes) -> bytes:
+    return b"\x30" + _encode_der_length(len(content)) + content
+
+
+def _encode_der_bit_string(data: bytes) -> bytes:
+    return b"\x03" + _encode_der_length(len(data) + 1) + b"\x00" + data
+
+
+def _get_tbs_and_template(builder: x509.CertificateBuilder, parent_pub_key: Any) -> tuple[bytes, bytes]:
+    from cryptography.hazmat.primitives.asymmetric import ec as ec_mod, ed25519 as ed25519_mod
+    if isinstance(parent_pub_key, ec_mod.EllipticCurvePublicKey):
+        dummy_parent = ec_mod.generate_private_key(parent_pub_key.curve)
+        dummy_cert = builder.sign(dummy_parent, hashes.SHA256())
+    elif isinstance(parent_pub_key, ed25519_mod.Ed25519PublicKey):
+        dummy_parent = ed25519_mod.Ed25519PrivateKey.generate()
+        dummy_cert = builder.sign(dummy_parent, None)
+    else:
+        raise ValueError(f"Unsupported key type for session signing: {type(parent_pub_key).__name__}")
+
+    tbs_bytes = dummy_cert.tbs_certificate_bytes
+    dummy_der = dummy_cert.public_bytes(serialization.Encoding.DER)
+    after_tbs = dummy_der[dummy_der.find(tbs_bytes) + len(tbs_bytes) :]
+    dummy_sig = dummy_cert.signature
+    bit_str_hdr = b"\x03" + _encode_der_length(len(dummy_sig) + 1) + b"\x00" + dummy_sig
+    sig_algo_bytes = after_tbs[: after_tbs.find(bit_str_hdr)]
+    return tbs_bytes, sig_algo_bytes
+
+
+def _assemble_signed_cert(tbs_bytes: bytes, sig_algo_bytes: bytes, signature: bytes) -> x509.Certificate:
+    leaf_der = _encode_der_sequence(tbs_bytes + sig_algo_bytes + _encode_der_bit_string(signature))
+    return x509.load_der_x509_certificate(leaf_der)
+
+
+def create_c2pa_session_signer_from_ssh_agent(
+    sock_path: Path | None = None,
+    key_comment: str | None = None,
+    cert_chain_pem: bytes | None = None,
+    domain: str = DEFAULT_DOMAIN,
+) -> c2pa.Signer:
+    """Creates a c2pa.Signer backed by an ephemeral in-memory session key authorized once via SSH Agent.
+
+    Generates an ephemeral EC SECP256R1 session key and requests a single signature authorization
+    from the SSH Agent (e.g. Bitwarden Desktop) to sign a subordinate session certificate.
+    All subsequent image signatures during the build session use this ephemeral key in RAM
+    with zero disk storage and zero additional authorization prompts.
+    """
+    sock = sock_path or find_ssh_agent_socket()
+    if not sock:
+        log_err("SSH agent socket not found.")
+        log_info("Ensure Bitwarden Desktop is running with SSH agent enabled ($SSH_AUTH_SOCK).")
+        sys.exit(1)
+
+    keys = ssh_agent_list_keys(sock)
+    if not keys:
+        log_err(f"No SSH keys available in agent at {sock}.")
+        log_info("Ensure Bitwarden Desktop is unlocked and contains an SSH key.")
+        sys.exit(1)
+
+    target_blob = None
+    target_type = None
+    target_comment = None
+
+    cfg = load_config()
+    wanted = key_comment or cfg.get("ssh_key_name") or "c2pa-signer"
+    for k_blob, k_type, comm in keys:
+        if wanted.lower() in comm.lower():
+            target_blob, target_type, target_comment = k_blob, k_type, comm
+            break
+
+    if not target_blob:
+        for k_blob, k_type, comm in keys:
+            if "ecdsa" in k_type or "ed25519" in k_type:
+                target_blob, target_type, target_comment = k_blob, k_type, comm
+                break
+
+    if not target_blob:
+        log_err(f"Could not find an ECDSA or Ed25519 key in SSH agent at {sock}.")
+        sys.exit(1)
+
+    c_bytes = cert_chain_pem
+    if not c_bytes:
+        if DEFAULT_CERT_PATH.is_file():
+            c_bytes = DEFAULT_CERT_PATH.read_bytes()
+        elif cfg.get("c2pa_cert_pem"):
+            c_bytes = cfg["c2pa_cert_pem"].encode("utf-8")
+        else:
+            log_err(f"C2PA certificate chain not found for SSH key '{target_comment}'.")
+            log_info(f"Generate certificates for this SSH key: {C_BOLD}media keys gen --agent{C_RESET}")
+            sys.exit(1)
+
+    certs = x509.load_pem_x509_certificates(c_bytes)
+    if not certs:
+        log_err("No valid X.509 certificates found in certificate chain.")
+        sys.exit(1)
+
+    parent_cert = certs[0]
+    parent_pub_key = parent_cert.public_key()
+
+    # Generate ephemeral EC SECP256R1 session key in RAM
+    session_key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    session_builder = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, f"{domain} Media Build Session"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, domain),
+        ]))
+        .issuer_name(parent_cert.subject)
+        .public_key(session_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(hours=24))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=True,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.EMAIL_PROTECTION]),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(session_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(parent_pub_key),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(domain)]),
+            critical=False,
+        )
+    )
+
+    tbs_bytes, sig_algo_bytes = _get_tbs_and_template(session_builder, parent_pub_key)
+
+    log_info(f"Awaiting build session signature authorization from Bitwarden Desktop ('{target_comment}')...")
+    sig = ssh_agent_sign(sock, target_blob, target_type, tbs_bytes)
+    log_ok("Build session authorized via Bitwarden SSH Agent (active for all assets in build).")
+
+    leaf_cert = _assemble_signed_cert(tbs_bytes, sig_algo_bytes, sig)
+    full_chain_pem = leaf_cert.public_bytes(serialization.Encoding.PEM) + c_bytes
+
+    session_key_pem = session_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+
+    signer_info = c2pa.C2paSignerInfo(
+        alg=c2pa.C2paSigningAlg.ES256,
+        sign_cert=full_chain_pem,
+        private_key=session_key_pem,
+        ta_url=None,
+    )
+    return c2pa.Signer.from_info(signer_info)
 
 
 def create_c2pa_signer_from_ssh_agent(
@@ -1483,6 +1674,7 @@ def process_signing(
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
+    signer: c2pa.Signer | None = None,
 ) -> None:
     """Executes multi-layer signing (DWT-DCT steganography + C2PA Credentials + OpenTimestamps)."""
     if not input_path.is_file():
@@ -1509,17 +1701,17 @@ def process_signing(
     log_info(f"Domain:      {act_domain}")
     log_info(f"Target:      {output_path}")
 
-    # Determine signing mode: SSH agent callback or in-memory / local key
+    # Determine signing mode: preloaded signer, SSH agent callback, or in-memory / local key
     is_agent_mode = use_agent or (cfg.get("signing_mode") == "ssh-agent" and not bw_item and not key_path)
-    signer: c2pa.Signer | None = None
+    c2pa_signer: c2pa.Signer | None = signer
     key_bytes: bytes | None = None
     cert_bytes: bytes | None = None
 
-    if not no_c2pa:
+    if not no_c2pa and c2pa_signer is None:
         if is_agent_mode:
             k_target = agent_key_name or cfg.get("ssh_key_name") or "c2pa-signer"
             c_target = cert_path.read_bytes() if cert_path and cert_path.is_file() else None
-            signer = create_c2pa_signer_from_ssh_agent(
+            c2pa_signer = create_c2pa_signer_from_ssh_agent(
                 key_comment=k_target,
                 cert_chain_pem=c_target,
             )
@@ -1536,7 +1728,7 @@ def process_signing(
                 private_key=key_bytes,
                 ta_url=None,
             )
-            signer = c2pa.Signer.from_info(signer_info)
+            c2pa_signer = c2pa.Signer.from_info(signer_info)
 
     # Derive watermark permutation secret from key bytes or configuration
     wm_secret = secret
@@ -1584,7 +1776,7 @@ def process_signing(
             shutil.copyfile(input_path, output_path)
 
     # Stage 2: C2PA Content Credentials
-    if not no_c2pa and signer:
+    if not no_c2pa and c2pa_signer:
         log_info("Stage 2: Signing with C2PA Content Credentials...")
 
         action_params: dict[str, Any] = {
@@ -1620,7 +1812,7 @@ def process_signing(
             temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}")
             if temp_dest.is_file():
                 temp_dest.unlink()
-            builder.sign_file(str(output_path), str(temp_dest), signer)
+            builder.sign_file(str(output_path), str(temp_dest), c2pa_signer)
             temp_dest.replace(output_path)
             log_ok("Stage 2 complete: C2PA cryptographic manifest embedded.")
         except Exception as e:
@@ -2919,6 +3111,7 @@ def execute_build(
                 except Exception as e:
                     log_warn(f"Could not render legacy showcase target {lbl}: {e}")
 
+    items_to_sign_pending: list[tuple[Path, Path, str, bool]] = []
     for src_file, dst_file, desc in items_to_sign:
         is_tmp = src_file.name.startswith(".tmp_")
 
@@ -2937,7 +3130,71 @@ def execute_build(
                 if is_tmp:
                     src_file.unlink(missing_ok=True)
                 continue
+        items_to_sign_pending.append((src_file, dst_file, desc, is_tmp))
 
+    # Pre-authorize single C2PA session signer and derive watermark secret once for entire build
+    batch_signer: c2pa.Signer | None = None
+    batch_wm_secret: str | None = None
+
+    if not no_sign and items_to_sign_pending:
+        cfg = load_config()
+        is_agent_mode = use_agent or (cfg.get("signing_mode") == "ssh-agent" and not bw_item)
+
+        # 1. Derive watermark permutation secret once for entire build
+        if is_agent_mode:
+            k_target = agent_key_name or cfg.get("ssh_key_name")
+            batch_wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
+        elif bw_item or cfg.get("bitwarden_item"):
+            target_bw = bw_item or cfg.get("bitwarden_item")
+            try:
+                k_bytes, _ = fetch_bitwarden_credentials(target_bw)
+                batch_wm_secret = hashlib.sha256(k_bytes).hexdigest()
+            except Exception:
+                pass
+        elif DEFAULT_KEY_PATH.is_file():
+            batch_wm_secret = hashlib.sha256(DEFAULT_KEY_PATH.read_bytes()).hexdigest()
+
+        # 2. Authorize single C2PA session signer for entire build
+        if not no_c2pa:
+            if is_agent_mode:
+                k_target = agent_key_name or cfg.get("ssh_key_name") or "c2pa-signer"
+                log_info(f"Initializing single C2PA session signer via SSH Agent for {len(items_to_sign_pending)} asset(s)...")
+                try:
+                    batch_signer = create_c2pa_session_signer_from_ssh_agent(
+                        key_comment=k_target,
+                        domain=cfg.get("domain", DEFAULT_DOMAIN),
+                    )
+                    log_ok(f"Session signer active: single SSH authorization covers all {len(items_to_sign_pending)} release(s).")
+                except Exception as e:
+                    log_warn(f"Failed to create session signer via SSH Agent: {e}. Falling back to per-file signing.")
+            elif bw_item or cfg.get("bitwarden_item"):
+                target_bw = bw_item or cfg.get("bitwarden_item")
+                try:
+                    k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
+                    signer_info = c2pa.C2paSignerInfo(
+                        alg=c2pa.C2paSigningAlg.ES256,
+                        sign_cert=c_bytes,
+                        private_key=k_bytes,
+                        ta_url=None,
+                    )
+                    batch_signer = c2pa.Signer.from_info(signer_info)
+                except Exception as e:
+                    log_warn(f"Failed to load Bitwarden credentials: {e}")
+            elif DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file():
+                try:
+                    k_bytes = DEFAULT_KEY_PATH.read_bytes()
+                    c_bytes = DEFAULT_CERT_PATH.read_bytes()
+                    signer_info = c2pa.C2paSignerInfo(
+                        alg=c2pa.C2paSigningAlg.ES256,
+                        sign_cert=c_bytes,
+                        private_key=k_bytes,
+                        ta_url=None,
+                    )
+                    batch_signer = c2pa.Signer.from_info(signer_info)
+                except Exception as e:
+                    log_warn(f"Failed to load local signing credentials: {e}")
+
+    for src_file, dst_file, desc, is_tmp in items_to_sign_pending:
         if not no_sign:
             log_info(f"Cryptographically signing {desc} -> {dst_file.name}...")
             process_signing(
@@ -2947,6 +3204,8 @@ def execute_build(
                 bw_item=bw_item,
                 use_agent=use_agent,
                 agent_key_name=agent_key_name,
+                signer=batch_signer,
+                secret=batch_wm_secret,
             )
             if is_tmp:
                 src_file.unlink(missing_ok=True)
