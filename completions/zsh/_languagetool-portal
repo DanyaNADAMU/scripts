@@ -6,6 +6,7 @@ _languagetool_portal() {
         '(-H --host)'{-H,--host}'[Bind host address (default: 127.0.0.1)]:host:' \
         '(-p --port)'{-p,--port}'[Bind port (default: 8012)]:port:' \
         '(-f --users-file)'{-f,--users-file}'[Path to LanguageTool users.txt]:users file:_files' \
+        '(-c --config-file)'{-c,--config-file}'[Path to LanguageTool config.properties]:config file:_files' \
         '(-u --server-url)'{-u,--server-url}'[Public LanguageTool URL for Obsidian]:url:' \
         '--in-place[Write users.txt in-place with flock to preserve inode]' \
         '--db-url[PostgreSQL connection URI]:url:' \

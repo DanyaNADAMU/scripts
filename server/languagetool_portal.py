@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,6 +53,7 @@ DEFAULT_DB_PORT = int(os.environ.get("LT_DB_PORT") or os.environ.get("PGPORT") o
 DEFAULT_DB_NAME = os.environ.get("LT_DB_NAME") or os.environ.get("PGDATABASE")
 DEFAULT_DB_USER = os.environ.get("LT_DB_USER") or os.environ.get("PGUSER")
 DEFAULT_DB_PASSWORD = os.environ.get("LT_DB_PASSWORD") or os.environ.get("PGPASSWORD")
+DEFAULT_CONFIG_FILE = os.environ.get("LT_CONFIG_FILE")
 
 SERVICE_NAME = "languagetool-portal"
 VERSION = "1.1.0"
@@ -68,10 +70,53 @@ _process_lock = threading.Lock()
 
 
 # ==============================================================================
+# Configuration Properties Auto-Detection
+# ==============================================================================
+def load_config_properties(
+    config_file: str | None = None,
+    users_file: str | None = None,
+) -> dict[str, str]:
+    """Discovers and parses LanguageTool config.properties file."""
+    candidates: list[str] = []
+    if config_file:
+        candidates.append(os.path.abspath(os.path.expanduser(config_file)))
+    if users_file:
+        data_dir = os.path.dirname(os.path.abspath(os.path.expanduser(users_file)))
+        candidates.append(os.path.join(data_dir, "config.properties"))
+        candidates.append(os.path.join(os.path.dirname(data_dir), "config.properties"))
+
+    candidates.extend([
+        os.path.expanduser("~/stacks/languagetool/data/config.properties"),
+        os.path.expanduser("~/stacks/languagetool/config.properties"),
+    ])
+
+    for path in candidates:
+        if os.path.isfile(path):
+            props: dict[str, str] = {}
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            props[k.strip()] = v.strip()
+                logger.info("Auto-detected LanguageTool config from %s", path)
+                return props
+            except OSError as e:
+                logger.warning("Could not read %s: %s", path, e)
+    return {}
+
+
+# ==============================================================================
 # Optional PostgreSQL Database Synchronization
 # ==============================================================================
 class DatabaseSync:
-    """Handles optional PostgreSQL synchronization for LanguageTool server-side dictionaries."""
+    """Handles PostgreSQL synchronization for LanguageTool server-side dictionaries.
+
+    LanguageTool stores user credentials in PostgreSQL table 'users' with columns:
+      (email, api_key)
+    where 'email' stores the Authentik username/identifier.
+    """
 
     def __init__(
         self,
@@ -81,45 +126,80 @@ class DatabaseSync:
         dbname: str | None = None,
         user: str | None = None,
         password: str | None = None,
+        props: dict[str, str] | None = None,
     ) -> None:
-        self.db_url = db_url or DEFAULT_DB_URL
-        self.host = host or DEFAULT_DB_HOST
-        self.port = port or DEFAULT_DB_PORT
-        self.dbname = dbname or DEFAULT_DB_NAME
-        self.user = user or DEFAULT_DB_USER
-        self.password = password or DEFAULT_DB_PASSWORD
+        props = props or {}
 
-        self.enabled = bool(self.db_url or (self.host and self.dbname))
+        # 1. Resolve raw URL from CLI/env or config.properties
+        raw_url = db_url or os.environ.get("LT_DB_URL") or os.environ.get("DATABASE_URL")
+        if not raw_url and "dbUrl" in props:
+            raw_url = props["dbUrl"]
+            if raw_url.startswith("jdbc:"):
+                raw_url = raw_url[5:]
+
+        # 2. Extract host, port, dbname from URL if present
+        parsed_host, parsed_port, parsed_dbname = None, None, None
+        if raw_url:
+            # Map container-internal DNS to loopback for host access
+            if "host.containers.internal" in raw_url:
+                raw_url = raw_url.replace("host.containers.internal", "127.0.0.1")
+            try:
+                p = urllib.parse.urlparse(raw_url)
+                parsed_host = p.hostname
+                parsed_port = p.port
+                parsed_dbname = p.path.lstrip("/")
+            except Exception:
+                pass
+
+        self.db_url = raw_url
+        self.host = host or os.environ.get("LT_DB_HOST") or os.environ.get("PGHOST") or parsed_host or "127.0.0.1"
+        self.port = port or int(os.environ.get("LT_DB_PORT") or os.environ.get("PGPORT") or parsed_port or 5432)
+        self.dbname = dbname or os.environ.get("LT_DB_NAME") or os.environ.get("PGDATABASE") or parsed_dbname or "languagetool"
+        self.user = user or os.environ.get("LT_DB_USER") or os.environ.get("PGUSER") or props.get("dbUsername") or "languagetool"
+        self.password = password or os.environ.get("LT_DB_PASSWORD") or os.environ.get("PGPASSWORD") or props.get("dbPassword")
+
+        # Enabled if db_url given OR if password/dbname configured from CLI, env, or properties
+        self.enabled = bool(db_url or os.environ.get("LT_DB_URL") or "dbUrl" in props or "dbPassword" in props or (password and user))
         self._driver = self._detect_driver() if self.enabled else None
 
     def _detect_driver(self) -> str:
-        try:
-            import psycopg  # noqa: F401
-            return "psycopg"
-        except ImportError:
-            pass
+        # Priority 1: python3-psycopg2 (Debian standard system package)
         try:
             import psycopg2  # noqa: F401
             return "psycopg2"
         except ImportError:
             pass
+        # Priority 2: psycopg (psycopg v3)
+        try:
+            import psycopg  # noqa: F401
+            return "psycopg"
+        except ImportError:
+            pass
+        # Priority 3: psql CLI utility (subprocess, zero python deps)
         if shutil.which("psql"):
             return "psql"
         return "none"
 
+    def _connect_db(self):
+        mod = __import__(self._driver)
+        return mod.connect(
+            host=self.host,
+            port=self.port,
+            dbname=self.dbname,
+            user=self.user,
+            password=self.password,
+        )
+
     def _get_psql_cmd(self) -> list[str]:
         cmd = ["psql"]
-        if self.db_url:
-            cmd.append(self.db_url)
-        else:
-            if self.host:
-                cmd.extend(["-h", self.host])
-            if self.port:
-                cmd.extend(["-p", str(self.port)])
-            if self.user:
-                cmd.extend(["-U", self.user])
-            if self.dbname:
-                cmd.extend(["-d", self.dbname])
+        if self.host:
+            cmd.extend(["-h", self.host])
+        if self.port:
+            cmd.extend(["-p", str(self.port)])
+        if self.user:
+            cmd.extend(["-U", self.user])
+        if self.dbname:
+            cmd.extend(["-d", self.dbname])
         return cmd
 
     def _get_psql_env(self) -> dict[str, str]:
@@ -132,21 +212,19 @@ class DatabaseSync:
         if not self.enabled:
             return False, "Disabled (Stateless / file-only mode)"
         if self._driver == "none":
-            return False, "Neither python psycopg/psycopg2 nor 'psql' CLI found"
+            return False, "Neither python3-psycopg2 nor 'psql' CLI found (install python3-psycopg2 or postgresql-client)"
 
-        if self._driver in ("psycopg", "psycopg2"):
+        target = f"{self.user}@{self.host}:{self.port}/{self.dbname}"
+        if self._driver in ("psycopg2", "psycopg"):
             try:
-                mod = __import__(self._driver)
-                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
-                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
-                )
+                conn = self._connect_db()
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT 1;")
                 conn.close()
-                return True, f"Connected via {self._driver}"
+                return True, f"Connected via {self._driver} ({target})"
             except Exception as e:
-                return False, str(e)
+                return False, f"{self._driver} connection failed to {target}: {e}"
         elif self._driver == "psql":
             cmd = self._get_psql_cmd() + ["-t", "-A", "-c", "SELECT 1;"]
             try:
@@ -159,23 +237,20 @@ class DatabaseSync:
                     timeout=5,
                 )
                 if res.returncode == 0:
-                    return True, "Connected via psql CLI"
-                return False, res.stderr.strip() or "psql connection failed"
+                    return True, f"Connected via psql CLI ({target})"
+                return False, f"psql connection failed to {target}: {res.stderr.strip()}"
             except Exception as e:
                 return False, str(e)
         return False, "Unknown driver"
 
     def get_token(self, username: str) -> str | None:
-        """Retrieves existing API token from PostgreSQL if present."""
+        """Retrieves existing API token from PostgreSQL 'users' table (email column)."""
         if not self.enabled or self._driver == "none":
             return None
-        sql = "SELECT api_key FROM users WHERE user_name = %s LIMIT 1;"
-        if self._driver in ("psycopg", "psycopg2"):
+        sql = "SELECT api_key FROM users WHERE email = %s LIMIT 1;"
+        if self._driver in ("psycopg2", "psycopg"):
             try:
-                mod = __import__(self._driver)
-                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
-                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
-                )
+                conn = self._connect_db()
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute(sql, (username,))
@@ -189,8 +264,8 @@ class DatabaseSync:
             cmd = self._get_psql_cmd() + [
                 "-t", "-A",
                 "-v", "ON_ERROR_STOP=1",
-                "-v", f"uname={username}",
-                "-c", "SELECT api_key FROM users WHERE user_name = :'uname' LIMIT 1;",
+                "-v", f"email={username}",
+                "-c", "SELECT api_key FROM users WHERE email = :'email' LIMIT 1;",
             ]
             try:
                 res = subprocess.run(
@@ -208,29 +283,26 @@ class DatabaseSync:
         return None
 
     def upsert_token(self, username: str, token: str) -> bool:
-        """Inserts or updates API token into PostgreSQL users table."""
+        """Inserts or updates API token into PostgreSQL 'users' table (email column)."""
         if not self.enabled:
             return True
         if self._driver == "none":
-            logger.warning("PostgreSQL sync is configured but no driver ('psycopg', 'psycopg2', or 'psql') is installed.")
+            logger.warning("PostgreSQL sync is configured but no driver ('psycopg2', 'psycopg', or 'psql') is installed.")
             return False
 
         sql = """
-        INSERT INTO users (user_name, api_key)
+        INSERT INTO users (email, api_key)
         VALUES (%s, %s)
-        ON CONFLICT (user_name) DO UPDATE SET api_key = EXCLUDED.api_key;
+        ON CONFLICT (email) DO UPDATE SET api_key = EXCLUDED.api_key;
         """
-        if self._driver in ("psycopg", "psycopg2"):
+        if self._driver in ("psycopg2", "psycopg"):
             try:
-                mod = __import__(self._driver)
-                conn = mod.connect(self.db_url) if self.db_url else mod.connect(
-                    host=self.host, port=self.port, dbname=self.dbname, user=self.user, password=self.password
-                )
+                conn = self._connect_db()
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute(sql, (username, token))
                 conn.close()
-                logger.info("Synced token for '%s' into PostgreSQL database", username)
+                logger.info("Synced token for '%s' into PostgreSQL users table (email column)", username)
                 return True
             except Exception as e:
                 logger.error("Failed to sync token for '%s' to PostgreSQL: %s", username, e)
@@ -238,9 +310,9 @@ class DatabaseSync:
         elif self._driver == "psql":
             cmd = self._get_psql_cmd() + [
                 "-v", "ON_ERROR_STOP=1",
-                "-v", f"uname={username}",
+                "-v", f"email={username}",
                 "-v", f"tok={token}",
-                "-c", "INSERT INTO users (user_name, api_key) VALUES (:'uname', :'tok') ON CONFLICT (user_name) DO UPDATE SET api_key = EXCLUDED.api_key;",
+                "-c", "INSERT INTO users (email, api_key) VALUES (:'email', :'tok') ON CONFLICT (email) DO UPDATE SET api_key = EXCLUDED.api_key;",
             ]
             try:
                 res = subprocess.run(
@@ -252,7 +324,7 @@ class DatabaseSync:
                     timeout=8,
                 )
                 if res.returncode == 0:
-                    logger.info("Synced token for '%s' into PostgreSQL database via psql", username)
+                    logger.info("Synced token for '%s' into PostgreSQL users table via psql", username)
                     return True
                 logger.error("Failed to sync token for '%s' via psql: %s", username, res.stderr.strip())
                 return False
@@ -260,6 +332,7 @@ class DatabaseSync:
                 logger.error("psql execution error: %s", e)
                 return False
         return False
+
 
 
 # ==============================================================================
@@ -1016,6 +1089,7 @@ def generate_systemd_unit(
     server_url: str,
     in_place: bool,
     db_url: str | None = None,
+    config_file: str | None = None,
     run_as_user: str | None = None,
 ) -> str:
     """Generates systemd unit file content."""
@@ -1028,6 +1102,8 @@ def generate_systemd_unit(
     ]
     if in_place:
         args.append("--in-place")
+    if config_file:
+        args.append(f"--config-file {config_file}")
     if db_url:
         args.append(f"--db-url {db_url}")
 
@@ -1058,6 +1134,7 @@ def setup_systemd_service(
     server_url: str,
     in_place: bool,
     db_url: str | None,
+    config_file: str | None,
     force_user: bool,
     force_system: bool,
     run_as: str | None,
@@ -1084,7 +1161,7 @@ def setup_systemd_service(
         unit_dir.mkdir(parents=True, exist_ok=True)
         unit_path = unit_dir / f"{SERVICE_NAME}.service"
         unit_content = generate_systemd_unit(
-            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, run_as_user=None
+            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, config_file=config_file, run_as_user=None
         )
         unit_path.write_text(unit_content, encoding="utf-8")
         print(f"✓ Installed user service: {unit_path}")
@@ -1101,7 +1178,7 @@ def setup_systemd_service(
         unit_dir = Path("/etc/systemd/system")
         unit_path = unit_dir / f"{SERVICE_NAME}.service"
         unit_content = generate_systemd_unit(
-            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, run_as_user=run_as
+            bin_path, host, port, users_file, server_url, in_place, db_url=db_url, config_file=config_file, run_as_user=run_as
         )
         unit_path.write_text(unit_content, encoding="utf-8")
         print(f"✓ Installed system service: {unit_path}")
@@ -1252,6 +1329,11 @@ Docker / Podman Inode Note:
         help=f"Path to users.txt (default: {DEFAULT_USERS_FILE})",
     )
     parser.add_argument(
+        "-c", "--config-file",
+        default=DEFAULT_CONFIG_FILE,
+        help="Path to LanguageTool config.properties to auto-load db parameters (default: auto-detected)",
+    )
+    parser.add_argument(
         "-u", "--server-url",
         default=DEFAULT_SERVER_URL,
         help=f"LanguageTool public URL shown in portal UI (default: {DEFAULT_SERVER_URL})",
@@ -1350,6 +1432,7 @@ def main() -> None:
     args = parse_arguments()
 
     users_file = os.path.abspath(os.path.expanduser(args.users_file))
+    props = load_config_properties(args.config_file, users_file)
 
     db = DatabaseSync(
         db_url=args.db_url,
@@ -1358,6 +1441,7 @@ def main() -> None:
         dbname=args.db_name,
         user=args.db_user,
         password=args.db_password,
+        props=props,
     )
 
     # Handle service inspection/setup subcommands
@@ -1371,6 +1455,7 @@ def main() -> None:
             args.server_url,
             args.in_place,
             db_url=args.db_url if db.enabled else None,
+            config_file=args.config_file,
             run_as_user=args.run_as if args.system else None,
         )
         print(unit)
@@ -1384,6 +1469,7 @@ def main() -> None:
             args.server_url,
             args.in_place,
             args.db_url if db.enabled else None,
+            args.config_file,
             args.user,
             args.system,
             args.run_as,

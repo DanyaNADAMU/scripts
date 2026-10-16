@@ -7,6 +7,7 @@ languagetool-portal \- self-service token portal for LanguageTool with Authentik
 [\fB\-H\fR|\fB\-\-host\fR \fIHOST\fR]
 [\fB\-p\fR|\fB\-\-port\fR \fIPORT\fR]
 [\fB\-f\fR|\fB\-\-users-file\fR \fIPATH\fR]
+[\fB\-c\fR|\fB\-\-config-file\fR \fIPATH\fR]
 [\fB\-u\fR|\fB\-\-server-url\fR \fIURL\fR]
 [\fB\-\-in-place\fR]
 [\fB\-\-setup-service\fR]
@@ -74,6 +75,9 @@ Listening port (default: \fB8012\fR).
 .BR \-f ", " \-\-users-file " \fIPATH\fR"
 Path to LanguageTool user credentials file (default: \fB~/stacks/languagetool/data/users.txt\fR).
 .TP
+.BR \-c ", " \-\-config-file " \fIPATH\fR"
+Path to LanguageTool \fBconfig.properties\fR to auto-discover database credentials (default: auto-detected).
+.TP
 .BR \-u ", " \-\-server-url " \fIURL\fR"
 Public LanguageTool API endpoint shown in the portal UI (default: \fBhttps://lt.nada.mu/v2\fR).
 .TP
@@ -134,6 +138,9 @@ Path to \fBusers.txt\fR (default: \fB~/stacks/languagetool/data/users.txt\fR).
 .TP
 .B LT_SERVER_URL
 Public LanguageTool endpoint (default: \fBhttps://lt.nada.mu/v2\fR).
+.TP
+.B LT_CONFIG_FILE
+Path to LanguageTool \fBconfig.properties\fR.
 .TP
 .B LT_IN_PLACE
 Enable in-place writing when set to \fBtrue\fR or \fB1\fR.
