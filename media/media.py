@@ -2231,6 +2231,7 @@ def execute_init(
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
         (target_proofs_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "to_sign" / "to_generate").mkdir(parents=True, exist_ok=True)
         (target_proofs_dir / "generated").mkdir(parents=True, exist_ok=True)
         (target_proofs_dir / "signed").mkdir(parents=True, exist_ok=True)
 
@@ -2287,6 +2288,9 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                 if rel_str in ("source/master", "01_source/master"):
                     candidate_paths.append(target_dir / "to_sign" / "to_generate" / base_name)
                     candidate_paths.append(target_dir / "signed" / base_name)
+                elif rel_str in ("to_sign/to_generate", "to_sign"):
+                    candidate_paths.append(target_dir / "source" / "master" / base_name)
+                    candidate_paths.append(target_dir / "01_source" / "master" / base_name)
 
                 for cand in candidate_paths:
                     if cand.is_file():
@@ -2347,10 +2351,10 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                 ),
             })
 
-    # Verify that all files in raw, generated, signed (and legacy source/dist) have .ots proofs
+    # Verify that all files in raw, to_sign, generated, signed (and legacy source/dist) have .ots proofs
     target_files_checked = set(all_ots_map.values())
     stamped_dirs = []
-    for d_name in ["raw", "generated", "signed", "source", "01_source", "02_signed", "dist", "03_dist"]:
+    for d_name in ["raw", "to_sign", "generated", "signed", "source", "01_source", "02_signed", "dist", "03_dist"]:
         cand = target_dir / d_name
         if cand.is_dir():
             stamped_dirs.append(cand)
@@ -2390,6 +2394,99 @@ def print_audit_report(asset_name: str, version: str, violations: list[dict[str,
         c = C_RED if sev == "CRITICAL" else (C_YELLOW if sev == "WARN" else C_RED)
         print(f"  {c}{sev:<10}{C_RESET} {v['type']:<16} {v['path']:<30} {v['desc']}")
     print("  " + "-" * 88 + "\n")
+
+
+def migrate_proofs_directory(proofs_dir: Path | None) -> int:
+    """Migrates legacy proofs directories (source/raw, source/master, dist, 02_signed)
+    to clean 1:1 mirror structure (raw, to_sign/to_generate, generated, signed)."""
+    if not proofs_dir or not proofs_dir.is_dir():
+        return 0
+
+    migrated_count = 0
+
+    # 1. raw: migrate source/raw and 01_source/raw -> raw/
+    p_raw = proofs_dir / "raw"
+    for old_raw in (proofs_dir / "source" / "raw", proofs_dir / "01_source" / "raw"):
+        if old_raw.is_dir():
+            p_raw.mkdir(parents=True, exist_ok=True)
+            for old_ots in old_raw.glob("*.ots"):
+                new_ots = p_raw / old_ots.name
+                if new_ots.is_file():
+                    new_ots.unlink()
+                shutil.move(old_ots, new_ots)
+                migrated_count += 1
+            try:
+                old_raw.rmdir()
+                old_raw.parent.rmdir()
+            except OSError:
+                pass
+
+    # 2. to_sign/to_generate: migrate source/master and 01_source/master -> to_sign/to_generate/
+    p_to_gen = proofs_dir / "to_sign" / "to_generate"
+    for old_master in (proofs_dir / "source" / "master", proofs_dir / "01_source" / "master"):
+        if old_master.is_dir():
+            p_to_gen.mkdir(parents=True, exist_ok=True)
+            for old_ots in old_master.glob("*.ots"):
+                new_ots = p_to_gen / old_ots.name
+                if new_ots.is_file():
+                    new_ots.unlink()
+                shutil.move(old_ots, new_ots)
+                migrated_count += 1
+            try:
+                old_master.rmdir()
+                old_master.parent.rmdir()
+            except OSError:
+                pass
+
+    # 3. to_sign: any remaining .ots in source/ or 01_source/ -> to_sign/
+    for old_source in (proofs_dir / "source", proofs_dir / "01_source"):
+        if old_source.is_dir():
+            p_to_sign = proofs_dir / "to_sign"
+            for old_ots in old_source.glob("*.ots"):
+                p_to_sign.mkdir(parents=True, exist_ok=True)
+                new_ots = p_to_sign / old_ots.name
+                if new_ots.is_file():
+                    new_ots.unlink()
+                shutil.move(old_ots, new_ots)
+                migrated_count += 1
+            try:
+                old_source.rmdir()
+            except OSError:
+                pass
+
+    # 4. generated: migrate dist and 03_dist -> generated/
+    p_gen = proofs_dir / "generated"
+    for old_dist in (proofs_dir / "dist", proofs_dir / "03_dist"):
+        if old_dist.is_dir():
+            p_gen.mkdir(parents=True, exist_ok=True)
+            for old_ots in old_dist.glob("*.ots"):
+                new_ots = p_gen / old_ots.name
+                if new_ots.is_file():
+                    new_ots.unlink()
+                shutil.move(old_ots, new_ots)
+                migrated_count += 1
+            try:
+                old_dist.rmdir()
+            except OSError:
+                pass
+
+    # 5. signed: migrate 02_signed -> signed/
+    p_signed = proofs_dir / "signed"
+    for old_signed in (proofs_dir / "02_signed",):
+        if old_signed.is_dir():
+            p_signed.mkdir(parents=True, exist_ok=True)
+            for old_ots in old_signed.glob("*.ots"):
+                new_ots = p_signed / old_ots.name
+                if new_ots.is_file():
+                    new_ots.unlink()
+                shutil.move(old_ots, new_ots)
+                migrated_count += 1
+            try:
+                old_signed.rmdir()
+            except OSError:
+                pass
+
+    return migrated_count
 
 
 def execute_build(
@@ -2531,75 +2628,15 @@ def execute_build(
 
     # Resolve separated proofs paths
     target_proofs_dir = None
-    proofs_raw_name = "raw"
-    proofs_gen_name = "generated"
-    proofs_signed_name = "signed"
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
+        migrate_proofs_directory(target_proofs_dir)
 
-        # Automatically migrate legacy proofs folders to clean layout if target_dir uses clean layout
-        if raw_dest_dir.name == "raw":
-            proofs_raw_name = "raw"
-            target_proofs_raw = target_proofs_dir / "raw"
-            for old_raw in (target_proofs_dir / "source" / "raw", target_proofs_dir / "01_source" / "raw"):
-                if old_raw.is_dir():
-                    target_proofs_raw.mkdir(parents=True, exist_ok=True)
-                    for old_ots in old_raw.glob("*.ots"):
-                        new_ots = target_proofs_raw / old_ots.name
-                        if new_ots.is_file():
-                            new_ots.unlink()
-                        shutil.move(old_ots, new_ots)
-                    try:
-                        old_raw.rmdir()
-                        old_raw.parent.rmdir()
-                    except OSError:
-                        pass
-        elif (target_proofs_dir / "source" / "raw").is_dir():
-            proofs_raw_name = "source/raw"
-        elif (target_proofs_dir / "01_source" / "raw").is_dir():
-            proofs_raw_name = "01_source/raw"
-
-        if gen_dir.name == "generated":
-            proofs_gen_name = "generated"
-            target_proofs_gen = target_proofs_dir / "generated"
-            for old_dist in (target_proofs_dir / "dist", target_proofs_dir / "03_dist"):
-                if old_dist.is_dir():
-                    target_proofs_gen.mkdir(parents=True, exist_ok=True)
-                    for old_ots in old_dist.glob("*.ots"):
-                        new_ots = target_proofs_gen / old_ots.name
-                        if new_ots.is_file():
-                            new_ots.unlink()
-                        shutil.move(old_ots, new_ots)
-                    try:
-                        old_dist.rmdir()
-                    except OSError:
-                        pass
-        elif (target_proofs_dir / "dist").is_dir():
-            proofs_gen_name = "dist"
-        elif (target_proofs_dir / "03_dist").is_dir():
-            proofs_gen_name = "03_dist"
-
-        if signed_dir.name == "signed":
-            proofs_signed_name = "signed"
-            target_proofs_signed = target_proofs_dir / "signed"
-            for old_signed in (target_proofs_dir / "02_signed",):
-                if old_signed.is_dir():
-                    target_proofs_signed.mkdir(parents=True, exist_ok=True)
-                    for old_ots in old_signed.glob("*.ots"):
-                        new_ots = target_proofs_signed / old_ots.name
-                        if new_ots.is_file():
-                            new_ots.unlink()
-                        shutil.move(old_ots, new_ots)
-                    try:
-                        old_signed.rmdir()
-                    except OSError:
-                        pass
-        elif (target_proofs_dir / "02_signed").is_dir():
-            proofs_signed_name = "02_signed"
-
-        (target_proofs_dir / proofs_raw_name).mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / proofs_gen_name).mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / proofs_signed_name).mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "to_sign" / "to_generate").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "to_sign").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "generated").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "signed").mkdir(parents=True, exist_ok=True)
 
     # Load or resolve scale manifest (targets, aspect ratio, favicon)
     manifest_cli_str = sizes_cli or (",".join(str(s) for s in sizes) if sizes else None)
@@ -2666,7 +2703,7 @@ def execute_build(
             raw_to_stamp: list[Path] = []
             for rf in raw_files:
                 final_ots = (
-                    (target_proofs_dir / proofs_raw_name / f"{rf.name}.ots")
+                    (target_proofs_dir / "raw" / f"{rf.name}.ots")
                     if target_proofs_dir
                     else rf.with_name(f"{rf.name}.ots")
                 )
@@ -2679,7 +2716,7 @@ def execute_build(
                 for rf in raw_to_stamp:
                     local_ots = rf.with_name(f"{rf.name}.ots")
                     if target_proofs_dir and local_ots.is_file():
-                        final_ots = target_proofs_dir / proofs_raw_name / f"{rf.name}.ots"
+                        final_ots = target_proofs_dir / "raw" / f"{rf.name}.ots"
                         if final_ots.is_file():
                             final_ots.unlink()
                         shutil.move(local_ots, final_ots)
@@ -2690,7 +2727,7 @@ def execute_build(
         for rf in raw_files:
             log_ok(f"Raw canvas secured: {rf.name} (0444)")
 
-    # 3. Stage 2: Stage Master in to_sign/to_generate/
+    # 3. Stage 2: Stage Master in to_sign/to_generate/ & Anchor to_sign input files with OTS
     dest_master = master_path
     if master_path.parent.resolve() != to_gen_dir.resolve() and (
         legacy_master_dir is None or master_path.parent.resolve() != legacy_master_dir.resolve()
@@ -2702,6 +2739,49 @@ def execute_build(
             shutil.copyfile(master_path, dest_master)
     dest_master.chmod(0o444)
     log_ok(f"Master image staged: {dest_master.name} (0444)")
+
+    # Anchor raw master and extra input files in to_sign/ with OTS before C2PA modifications
+    if not no_stamp:
+        to_sign_to_stamp: list[tuple[Path, Path]] = []
+        if to_gen_dir.is_dir():
+            for f in sorted(to_gen_dir.iterdir()):
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith("."):
+                    f.chmod(0o444)
+                    final_ots = (
+                        (target_proofs_dir / "to_sign" / "to_generate" / f"{f.name}.ots")
+                        if target_proofs_dir
+                        else f.with_name(f"{f.name}.ots")
+                    )
+                    if not final_ots.is_file() or force:
+                        to_sign_to_stamp.append((f, final_ots))
+
+        if to_sign_dir.is_dir():
+            for f in sorted(to_sign_dir.iterdir()):
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith("."):
+                    f.chmod(0o444)
+                    final_ots = (
+                        (target_proofs_dir / "to_sign" / f"{f.name}.ots")
+                        if target_proofs_dir
+                        else f.with_name(f"{f.name}.ots")
+                    )
+                    if not final_ots.is_file() or force:
+                        to_sign_to_stamp.append((f, final_ots))
+
+        if to_sign_to_stamp:
+            files_list = [f for f, _ in to_sign_to_stamp]
+            log_info(f"Anchoring raw master/input ({len(files_list)} file(s)) in Bitcoin blockchain...")
+            stamp_media_files(files_list, force=True)
+            for f, final_ots in to_sign_to_stamp:
+                local_ots = f.with_name(f"{f.name}.ots")
+                if target_proofs_dir and local_ots.is_file():
+                    final_ots.parent.mkdir(parents=True, exist_ok=True)
+                    if final_ots.is_file():
+                        final_ots.unlink()
+                    shutil.move(local_ots, final_ots)
+                    final_ots.chmod(0o444)
+                elif local_ots.is_file():
+                    local_ots.chmod(0o444)
+            log_ok(f"Anchored all {len(files_list)} to_sign input file(s) in Bitcoin blockchain (OpenTimestamps)")
 
     # 4. Stage 3: Render Multi-Scale Distribution (generated/) and Batch-Stamp with OTS
     log_info(f"Rendering distribution assets ({len(targets)} targets) into {gen_dir.name}/...")
@@ -2763,7 +2843,7 @@ def execute_build(
         for gf in gen_files:
             gf.chmod(0o444)
             final_ots = (
-                (target_proofs_dir / proofs_gen_name / f"{gf.name}.ots")
+                (target_proofs_dir / "generated" / f"{gf.name}.ots")
                 if target_proofs_dir
                 else gf.with_name(f"{gf.name}.ots")
             )
@@ -2775,7 +2855,7 @@ def execute_build(
             for gf in gen_to_stamp:
                 local_ots = gf.with_name(f"{gf.name}.ots")
                 if target_proofs_dir and local_ots.is_file():
-                    final_ots = target_proofs_dir / proofs_gen_name / f"{gf.name}.ots"
+                    final_ots = target_proofs_dir / "generated" / f"{gf.name}.ots"
                     if final_ots.is_file():
                         final_ots.unlink()
                     shutil.move(local_ots, final_ots)
@@ -2846,7 +2926,7 @@ def execute_build(
         if dst_file.is_file() and not force:
             local_ots = dst_file.with_name(f"{dst_file.name}.ots")
             remote_ots = (
-                (target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots")
+                (target_proofs_dir / "signed" / f"{dst_file.name}.ots")
                 if target_proofs_dir
                 else local_ots
             )
@@ -2872,7 +2952,7 @@ def execute_build(
                 src_file.unlink(missing_ok=True)
             local_ots = dst_file.with_name(f"{dst_file.name}.ots")
             if target_proofs_dir and local_ots.is_file():
-                final_ots = target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots"
+                final_ots = target_proofs_dir / "signed" / f"{dst_file.name}.ots"
                 if final_ots.is_file():
                     final_ots.unlink()
                 shutil.move(local_ots, final_ots)
@@ -2892,7 +2972,7 @@ def execute_build(
             if not no_stamp:
                 local_ots = dst_file.with_name(f"{dst_file.name}.ots")
                 final_ots = (
-                    (target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots")
+                    (target_proofs_dir / "signed" / f"{dst_file.name}.ots")
                     if target_proofs_dir
                     else local_ots
                 )
@@ -2952,6 +3032,159 @@ def execute_list(base_dir: Path, proofs_base: Path | None = None) -> None:
             latest_target = os.readlink(latest_p) if latest_p.is_symlink() else "N/A"
             print(f"  {C_BOLD}• {a_dir.name:<20}{C_RESET} Versions: {', '.join(versions) or 'none'} (latest -> {latest_target})")
     print()
+
+
+def execute_migrate(
+    base_dir: Path,
+    proofs_base: Path | None = None,
+    name: str | None = None,
+    version: str | None = None,
+) -> None:
+    """Migrates asset directories and proofs archives to clean 1:1 mirror structure."""
+    log_head("Migrating Asset & Proofs Library to 1:1 Mirror Layout")
+
+    def _migrate_version(v_dir: Path, p_dir: Path | None):
+        a_slug = v_dir.parent.name
+        v_tag = v_dir.name
+        print(f"  {C_BOLD}Checking:{C_RESET} {a_slug}/{v_tag}")
+
+        # 1. Project canvases (.xcf, .psd, etc.) -> raw/
+        raw_dest = v_dir / "raw"
+        raw_dest.mkdir(parents=True, exist_ok=True)
+        for s_dir in (
+            v_dir / "source" / "raw",
+            v_dir / "01_source" / "raw",
+            v_dir / "to_sign" / "to_generate",
+            v_dir / "to_sign",
+            v_dir / "source",
+            v_dir / "01_source",
+            v_dir,
+        ):
+            if s_dir.is_dir():
+                for f in sorted(s_dir.iterdir()):
+                    if f.is_file() and not f.name.startswith(".") and f.suffix.lower() in (".xcf", ".psd", ".kra", ".blend", ".ai"):
+                        target_canvas = raw_dest / f.name
+                        if target_canvas.resolve() != f.resolve():
+                            if target_canvas.is_file():
+                                target_canvas.unlink()
+                            shutil.move(f, target_canvas)
+                            log_ok(f"    Organized canvas: {f.name} -> raw/")
+                            ots_f = f.with_name(f"{f.name}.ots")
+                            if ots_f.is_file():
+                                target_ots = raw_dest / ots_f.name
+                                if target_ots.is_file():
+                                    target_ots.unlink()
+                                shutil.move(ots_f, target_ots)
+
+        # 2. Master image -> to_sign/to_generate/
+        to_gen = v_dir / "to_sign" / "to_generate"
+        for old_m in (v_dir / "source" / "master", v_dir / "01_source" / "master"):
+            if old_m.is_dir():
+                to_gen.mkdir(parents=True, exist_ok=True)
+                for f in sorted(old_m.iterdir()):
+                    if f.is_file():
+                        tgt = to_gen / f.name
+                        if tgt.is_file():
+                            tgt.unlink()
+                        shutil.move(f, tgt)
+                        log_ok(f"    Moved master: {f.name} -> to_sign/to_generate/")
+                        ots_f = f.with_name(f"{f.name}.ots")
+                        if ots_f.is_file():
+                            target_ots = to_gen / ots_f.name
+                            if target_ots.is_file():
+                                target_ots.unlink()
+                            shutil.move(ots_f, target_ots)
+
+        # 3. Generated assets -> generated/
+        gen_dir = v_dir / "generated"
+        for old_dist in (v_dir / "dist", v_dir / "03_dist"):
+            if old_dist.is_dir():
+                gen_dir.mkdir(parents=True, exist_ok=True)
+                for f in sorted(old_dist.iterdir()):
+                    if f.is_file():
+                        tgt = gen_dir / f.name
+                        if tgt.is_file():
+                            tgt.unlink()
+                        shutil.move(f, tgt)
+                        log_ok(f"    Moved generated: {f.name} -> generated/")
+                        ots_f = f.with_name(f"{f.name}.ots")
+                        if ots_f.is_file():
+                            target_ots = gen_dir / ots_f.name
+                            if target_ots.is_file():
+                                target_ots.unlink()
+                            shutil.move(ots_f, target_ots)
+
+        # 4. Signed releases -> signed/
+        signed_dir = v_dir / "signed"
+        for old_signed in (v_dir / "02_signed",):
+            if old_signed.is_dir():
+                signed_dir.mkdir(parents=True, exist_ok=True)
+                for f in sorted(old_signed.iterdir()):
+                    if f.is_file():
+                        tgt = signed_dir / f.name
+                        if tgt.is_file():
+                            tgt.unlink()
+                        shutil.move(f, tgt)
+                        log_ok(f"    Moved signed: {f.name} -> signed/")
+                        ots_f = f.with_name(f"{f.name}.ots")
+                        if ots_f.is_file():
+                            target_ots = signed_dir / ots_f.name
+                            if target_ots.is_file():
+                                target_ots.unlink()
+                            shutil.move(ots_f, target_ots)
+
+        # Clean up empty legacy directories in asset tree
+        for old_dir in (
+            v_dir / "source" / "raw",
+            v_dir / "01_source" / "raw",
+            v_dir / "source" / "master",
+            v_dir / "01_source" / "master",
+            v_dir / "source",
+            v_dir / "01_source",
+            v_dir / "dist",
+            v_dir / "03_dist",
+            v_dir / "02_signed",
+        ):
+            if old_dir.is_dir():
+                try:
+                    old_dir.rmdir()
+                except OSError:
+                    pass
+
+        # 5. Proofs archive migration
+        if p_dir and p_dir.is_dir():
+            count = migrate_proofs_directory(p_dir)
+            if count > 0:
+                log_ok(f"    Migrated {count} proof(s) in Icons-Proofs -> 1:1 mirror layout.")
+
+    if name and version:
+        v_dir = base_dir / name / version
+        p_dir = (proofs_base / name / version) if proofs_base else None
+        if not v_dir.is_dir() and not (p_dir and p_dir.is_dir()):
+            log_err(f"Asset version not found: {name} ({version})")
+            return
+        _migrate_version(v_dir, p_dir)
+    elif name:
+        a_dir = base_dir / name
+        if not a_dir.is_dir():
+            log_err(f"Asset directory not found: {a_dir}")
+            return
+        for v_dir in sorted(a_dir.iterdir()):
+            if v_dir.is_dir() and not v_dir.is_symlink():
+                p_dir = (proofs_base / name / v_dir.name) if proofs_base else None
+                _migrate_version(v_dir, p_dir)
+    else:
+        if not base_dir.is_dir():
+            log_warn(f"Icons directory does not exist: {base_dir}")
+            return
+        for a_dir in sorted(base_dir.iterdir()):
+            if a_dir.is_dir() and not a_dir.name.startswith("."):
+                for v_dir in sorted(a_dir.iterdir()):
+                    if v_dir.is_dir() and not v_dir.is_symlink():
+                        p_dir = (proofs_base / a_dir.name / v_dir.name) if proofs_base else None
+                        _migrate_version(v_dir, p_dir)
+
+    log_ok("Migration complete! Run 'media audit' to verify integrity.\n")
 
 
 # ------------------------------------------------------------------------------
@@ -3160,6 +3393,7 @@ Asset Pipeline Examples:
   media build duck v2 --bw                       # Build using Bitwarden in-memory CLI keys
   media audit duck v1                            # Verify asset integrity against Bitcoin
   media audit                                    # Full integrity audit of entire library
+  media migrate                                  # Migrate legacy folders to 1:1 mirror layout
   media list                                     # List managed assets and active versions
   media upgrade duck v1                          # Upgrade OTS proofs for an asset
 
@@ -3215,6 +3449,13 @@ Automation & Keys Examples:
     p_list = subparsers.add_parser("list", help="List managed assets and versions")
     p_list.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
     p_list.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
+
+    # Command: migrate
+    p_mig = subparsers.add_parser("migrate", help="Migrate legacy library folder layout to clean 1:1 mirror structure")
+    p_mig.add_argument("name", type=str, nargs="?", help="Specific asset name to migrate (optional)")
+    p_mig.add_argument("version", type=str, nargs="?", help="Specific version to migrate (optional)")
+    p_mig.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
+    p_mig.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     # Command: upgrade
     p_up = subparsers.add_parser("upgrade", help="Recursively upgrade OpenTimestamps proofs in Bitcoin")
@@ -3289,7 +3530,7 @@ Automation & Keys Examples:
 
     # Shortcut handling: if first arg is an existing file, default to 'verify'
     args_list = sys.argv[1:]
-    all_cmds = ("init", "build", "audit", "list", "upgrade", "sign", "verify", "stamp", "timer", "keys", "-h", "--help")
+    all_cmds = ("init", "build", "audit", "list", "migrate", "upgrade", "sign", "verify", "stamp", "timer", "keys", "-h", "--help")
     if args_list and args_list[0] not in all_cmds:
         if any(arg == "--verify" for arg in args_list):
             args_list.remove("--verify")
@@ -3366,6 +3607,10 @@ Automation & Keys Examples:
     # Dispatch: list
     elif args.command == "list":
         execute_list(base_dir, proofs_base)
+
+    # Dispatch: migrate
+    elif args.command == "migrate":
+        execute_migrate(base_dir, proofs_base, name=args.name, version=args.version)
 
     # Dispatch: upgrade
     elif args.command == "upgrade":
