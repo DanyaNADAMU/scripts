@@ -1171,6 +1171,46 @@ def stamp_media_file(target_file: Path, wait: bool = False, force: bool = False)
         raise
 
 
+def stamp_media_files(target_files: list[Path], wait: bool = False, force: bool = False) -> list[Path]:
+    """Anchors multiple files in the Bitcoin blockchain via OpenTimestamps in a single batch."""
+    to_stamp: list[Path] = []
+    created_ots: list[Path] = []
+
+    for f in target_files:
+        if not f.is_file():
+            continue
+        ots_path = f.with_name(f"{f.name}.ots")
+        if ots_path.is_file() and not force:
+            created_ots.append(ots_path)
+        else:
+            to_stamp.append(f)
+
+    if not to_stamp:
+        return created_ots
+
+    log_info(f"Anchoring {len(to_stamp)} file(s) in Bitcoin blockchain (OpenTimestamps batch)...")
+    cli_args = ["stamp"]
+    if wait:
+        cli_args.append("--wait")
+    cli_args.extend(str(f) for f in to_stamp)
+
+    try:
+        parsed_args = otsclient.args.parse_ots_args(cli_args)
+        parsed_args.cmd_func(parsed_args)
+        for f in to_stamp:
+            ots_path = f.with_name(f"{f.name}.ots")
+            if ots_path.is_file():
+                created_ots.append(ots_path)
+            else:
+                log_warn(f"OpenTimestamps did not produce {ots_path.name}")
+        log_ok(f"Created {len(to_stamp)} Bitcoin timestamp proof(s).")
+    except Exception as e:
+        log_err(f"OpenTimestamps batch stamping failed: {e}")
+        raise
+
+    return created_ots
+
+
 def upgrade_ots_file(target_path: Path) -> bool:
     """Upgrades a pending .ots proof file, or recursively upgrades all .ots files in a directory."""
     if target_path.is_dir():
@@ -1902,10 +1942,6 @@ def detect_aspect_ratio_and_targets(
         "master_dimensions": f"{w}x{h}",
         "generate_favicon": generate_favicon,
         "formats": ["webp", "png"],
-        "signed": {
-            "enabled": True,
-            "sizes": [1024],
-        },
         "targets": filtered_targets,
     }
 
@@ -1960,10 +1996,6 @@ def load_or_resolve_manifest(
                 "aspect_ratio": "1:1",
                 "generate_favicon": True,
                 "formats": ["webp", "png"],
-                "signed": {
-                    "enabled": True,
-                    "sizes": [1024],
-                },
                 "targets": [
                     {"width": 512, "height": 512, "label": "512"},
                     {"width": 256, "height": 256, "label": "256"},
@@ -1987,8 +2019,6 @@ def load_or_resolve_manifest(
             ]):
                 manifest["targets"] = auto_m["targets"]
                 manifest["generate_favicon"] = auto_m["generate_favicon"]
-            if "signed" not in manifest:
-                manifest["signed"] = auto_m.get("signed", {"enabled": True, "sizes": [1024]})
             save_path = target_dir / "manifest.json"
             try:
                 with open(save_path, "w", encoding="utf-8") as f:
@@ -2056,7 +2086,7 @@ def load_or_resolve_manifest(
     if raw_signed is None:
         raw_signed = manifest.get("showcase")
 
-    signed_config: dict[str, Any] = {"enabled": True, "sizes": [1024], "targets": []}
+    signed_config: dict[str, Any] = {"enabled": True, "sizes": [], "targets": []}
     if raw_signed is False:
         signed_config["enabled"] = False
         signed_config["sizes"] = []
@@ -2068,7 +2098,7 @@ def load_or_resolve_manifest(
         signed_config["sizes"] = raw_signed
     elif isinstance(raw_signed, dict):
         signed_config["enabled"] = bool(raw_signed.get("enabled", True))
-        raw_sizes = raw_signed.get("sizes") or ([raw_signed.get("size")] if raw_signed.get("size") else [1024])
+        raw_sizes = raw_signed.get("sizes") or ([raw_signed.get("size")] if raw_signed.get("size") else [])
         signed_config["sizes"] = raw_sizes if isinstance(raw_sizes, list) else [raw_sizes]
 
     signed_targets: list[dict[str, Any]] = []
@@ -2128,15 +2158,17 @@ def execute_init(
     resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
 
     target_dir = icons_dir / name / version
-    raw_dir = target_dir / "source" / "raw"
-    master_dir = target_dir / "source" / "master"
+    raw_dir = target_dir / "raw"
+    to_sign_dir = target_dir / "to_sign"
+    to_gen_dir = to_sign_dir / "to_generate"
+    gen_dir = target_dir / "generated"
     signed_dir = target_dir / "signed"
-    dist_dir = target_dir / "dist"
 
     raw_dir.mkdir(parents=True, exist_ok=True)
-    master_dir.mkdir(parents=True, exist_ok=True)
+    to_sign_dir.mkdir(parents=True, exist_ok=True)
+    to_gen_dir.mkdir(parents=True, exist_ok=True)
+    gen_dir.mkdir(parents=True, exist_ok=True)
     signed_dir.mkdir(parents=True, exist_ok=True)
-    dist_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize default manifest.json if absent
     manifest_path = target_dir / "manifest.json"
@@ -2147,10 +2179,6 @@ def execute_init(
             "aspect_ratio": "auto",
             "generate_favicon": True,
             "formats": ["webp", "png"],
-            "signed": {
-                "enabled": True,
-                "sizes": [1024],
-            },
             "targets": [
                 {"width": 512, "height": 512, "label": "512"},
                 {"width": 256, "height": 256, "label": "256"},
@@ -2170,23 +2198,25 @@ def execute_init(
     target_proofs_dir = None
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
-        (target_proofs_dir / "source" / "raw").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / "source" / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / "generated").mkdir(parents=True, exist_ok=True)
         (target_proofs_dir / "signed").mkdir(parents=True, exist_ok=True)
 
     log_head(f"Initialized Asset Structure: {name} ({version})")
     log_ok(f"Raw Project:    {raw_dir}")
-    log_ok(f"Master Image:   {master_dir}")
+    log_ok(f"To Sign / Gen:  {to_gen_dir}")
+    log_ok(f"To Sign (Extra):{to_sign_dir}")
+    log_ok(f"Generated:      {gen_dir}")
     log_ok(f"Signed Release: {signed_dir}")
-    log_ok(f"Distribution:   {dist_dir}")
     if target_proofs_dir:
         log_ok(f"Proofs Archive: {target_proofs_dir}")
 
     print(f"\n  {C_BOLD}Next steps:{C_RESET}")
-    print(f"    1. Place raw canvas (e.g. {name}.xcf) into: {C_CYAN}{raw_dir}/{C_RESET}")
-    print(f"    2. Place master image (PNG/WebP) into:      {C_CYAN}{master_dir}/{C_RESET}")
-    print(f"    3. (Optional) Customize sizes in:          {C_CYAN}{manifest_path}/{C_RESET}")
-    print(f"    4. Run build: {C_GREEN}media build {name} {version}{C_RESET}\n")
+    print(f"    1. Place raw canvas (e.g. {name}.xcf) into:        {C_CYAN}{raw_dir}/{C_RESET}")
+    print(f"    2. Place master image (PNG/WebP) into:             {C_CYAN}{to_gen_dir}/{C_RESET}")
+    print(f"    3. (Optional) Place extra images to sign into:     {C_CYAN}{to_sign_dir}/{C_RESET}")
+    print(f"    4. (Optional) Customize sizes in:                 {C_CYAN}{manifest_path}/{C_RESET}")
+    print(f"    5. Run build: {C_GREEN}media build {name} {version}{C_RESET}\n")
 
     return target_dir, target_proofs_dir
 
@@ -2202,7 +2232,7 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
             base_name = ots.name[:-4]
             expected_target = target_dir / rel.parent / base_name
 
-            # Seamless backward-compatibility check for legacy '01_source' / '02_signed' paths
+            # Seamless backward-compatibility check for legacy '01_source' / '02_signed' / 'dist' paths
             if not expected_target.is_file():
                 rel_parts = list(rel.parent.parts)
                 for idx, part in enumerate(rel_parts):
@@ -2214,9 +2244,21 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                         rel_parts[idx] = "02_signed"
                     elif part == "02_signed":
                         rel_parts[idx] = "signed"
+                    elif part == "dist":
+                        rel_parts[idx] = "generated"
+                    elif part == "generated":
+                        rel_parts[idx] = "dist"
                 alt_target = target_dir / Path(*rel_parts) / base_name
                 if alt_target.is_file():
                     expected_target = alt_target
+                elif len(rel_parts) == 1 and rel_parts[0] == "raw":
+                    legacy_raw = target_dir / "source" / "raw" / base_name
+                    if legacy_raw.is_file():
+                        expected_target = legacy_raw
+                elif len(rel_parts) >= 2 and rel_parts[:2] == ["source", "raw"]:
+                    new_raw = target_dir / "raw" / base_name
+                    if new_raw.is_file():
+                        expected_target = new_raw
 
             all_ots_map[ots] = expected_target
 
@@ -2263,13 +2305,16 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                 ),
             })
 
-    src_dir = target_dir / "source"
-    if not src_dir.is_dir() and (target_dir / "01_source").is_dir():
-        src_dir = target_dir / "01_source"
+    # Verify that all files in raw, generated, signed (and legacy source/dist) have .ots proofs
+    target_files_checked = set(all_ots_map.values())
+    stamped_dirs = []
+    for d_name in ["raw", "generated", "signed", "source", "01_source", "02_signed", "dist", "03_dist"]:
+        cand = target_dir / d_name
+        if cand.is_dir():
+            stamped_dirs.append(cand)
 
-    if src_dir.is_dir():
-        target_files_checked = set(all_ots_map.values())
-        for f in src_dir.rglob("*"):
+    for s_dir in stamped_dirs:
+        for f in s_dir.rglob("*"):
             if (
                 f.is_file()
                 and not f.name.endswith(".ots")
@@ -2281,7 +2326,7 @@ def run_audit(target_dir: Path, proofs_dir: Path | None = None) -> tuple[int, li
                         "path": str(f.relative_to(target_dir)),
                         "type": "MISSING_PROOF",
                         "severity": "WARN",
-                        "desc": "Source asset has not been anchored in Bitcoin blockchain (.ots missing).",
+                        "desc": f"Asset in {f.parent.name}/ has not been anchored in Bitcoin blockchain (.ots missing).",
                     })
 
     return len([v for v in violations if v["severity"] in ("CRITICAL", "ERROR")]), violations
@@ -2326,26 +2371,40 @@ def execute_build(
     resolved_proofs_dir = proofs_dir or get_default_proofs_dir(icons_dir)
     target_dir = icons_dir / name / version
 
-    # Resolve directories with backward-compatibility for legacy 01_source / 02_signed / 03_dist
-    src_dir = target_dir / "source"
-    if not src_dir.is_dir() and (target_dir / "01_source").is_dir():
-        src_dir = target_dir / "01_source"
-    raw_dest_dir = src_dir / "raw"
-    master_dest_dir = src_dir / "master"
+    # Resolve primary and legacy directories
+    raw_dest_dir = target_dir / "raw"
+    if not raw_dest_dir.is_dir():
+        if (target_dir / "source" / "raw").is_dir():
+            raw_dest_dir = target_dir / "source" / "raw"
+        elif (target_dir / "01_source" / "raw").is_dir():
+            raw_dest_dir = target_dir / "01_source" / "raw"
+
+    to_sign_dir = target_dir / "to_sign"
+    to_gen_dir = to_sign_dir / "to_generate"
+    legacy_master_dir = None
+    if not to_gen_dir.is_dir():
+        if (target_dir / "source" / "master").is_dir():
+            legacy_master_dir = target_dir / "source" / "master"
+        elif (target_dir / "01_source" / "master").is_dir():
+            legacy_master_dir = target_dir / "01_source" / "master"
+
+    gen_dir = target_dir / "generated"
+    if not gen_dir.is_dir():
+        if (target_dir / "dist").is_dir():
+            gen_dir = target_dir / "dist"
+        elif (target_dir / "03_dist").is_dir():
+            gen_dir = target_dir / "03_dist"
 
     signed_dir = target_dir / "signed"
-    if not signed_dir.is_dir() and (target_dir / "02_signed").is_dir():
-        signed_dir = target_dir / "02_signed"
+    if not signed_dir.is_dir():
+        if (target_dir / "02_signed").is_dir():
+            signed_dir = target_dir / "02_signed"
 
-    dist_dir = target_dir / "dist"
-    if not dist_dir.is_dir() and (target_dir / "03_dist").is_dir():
-        dist_dir = target_dir / "03_dist"
-
-    # Auto-detect existing master if not provided
+    # Auto-detect master image if not provided
     if master_path is None:
-        if master_dest_dir.is_dir():
+        if to_gen_dir.is_dir():
             candidates = [
-                f for f in sorted(master_dest_dir.iterdir())
+                f for f in sorted(to_gen_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
             img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
@@ -2355,6 +2414,27 @@ def execute_build(
             elif candidates:
                 master_path = candidates[0]
                 log_info(f"Auto-detected master image: {master_path.name}")
+        elif legacy_master_dir and legacy_master_dir.is_dir():
+            candidates = [
+                f for f in sorted(legacy_master_dir.iterdir())
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+            ]
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            if img_cands:
+                master_path = img_cands[0]
+                log_info(f"Auto-detected master image (legacy): {master_path.name}")
+            elif candidates:
+                master_path = candidates[0]
+                log_info(f"Auto-detected master image (legacy): {master_path.name}")
+        elif to_sign_dir.is_dir():
+            candidates = [
+                f for f in sorted(to_sign_dir.iterdir())
+                if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+            ]
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            if img_cands:
+                master_path = img_cands[0]
+                log_info(f"Auto-detected master image in to_sign/: {master_path.name}")
 
     # Auto-detect existing raw project canvas if not provided
     if raw_path is None:
@@ -2363,7 +2443,7 @@ def execute_build(
                 f for f in sorted(raw_dest_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            canvas_cands = [f for f in raw_candidates if f.suffix.lower() in (".xcf", ".psd", ".kra", ".svg", ".ai")]
+            canvas_cands = [f for f in raw_candidates if f.suffix.lower() in (".xcf", ".psd", ".kra", ".svg", ".ai", ".blend")]
             if canvas_cands:
                 raw_path = canvas_cands[0]
                 log_info(f"Auto-detected raw project canvas: {raw_path.name}")
@@ -2384,18 +2464,28 @@ def execute_build(
         log_err(f"Raw project canvas file not found: {raw_path}")
         sys.exit(1)
 
+    # Resolve separated proofs paths
     target_proofs_dir = None
-    proofs_src_name = "source"
+    proofs_raw_name = "raw"
+    proofs_gen_name = "generated"
     proofs_signed_name = "signed"
     if resolved_proofs_dir:
         target_proofs_dir = resolved_proofs_dir / name / version
-        if (resolved_proofs_dir / name / version / "01_source").is_dir():
-            proofs_src_name = "01_source"
-        if (resolved_proofs_dir / name / version / "02_signed").is_dir():
+        if (target_proofs_dir / "source" / "raw").is_dir():
+            proofs_raw_name = "source/raw"
+        elif (target_proofs_dir / "01_source" / "raw").is_dir():
+            proofs_raw_name = "01_source/raw"
+
+        if (target_proofs_dir / "dist").is_dir():
+            proofs_gen_name = "dist"
+        elif (target_proofs_dir / "03_dist").is_dir():
+            proofs_gen_name = "03_dist"
+
+        if (target_proofs_dir / "02_signed").is_dir():
             proofs_signed_name = "02_signed"
 
-        (target_proofs_dir / proofs_src_name / "raw").mkdir(parents=True, exist_ok=True)
-        (target_proofs_dir / proofs_src_name / "master").mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / proofs_raw_name).mkdir(parents=True, exist_ok=True)
+        (target_proofs_dir / proofs_gen_name).mkdir(parents=True, exist_ok=True)
         (target_proofs_dir / proofs_signed_name).mkdir(parents=True, exist_ok=True)
 
     # Load or resolve scale manifest (targets, aspect ratio, favicon)
@@ -2432,112 +2522,68 @@ def execute_build(
             sys.exit(1)
 
     raw_dest_dir.mkdir(parents=True, exist_ok=True)
-    master_dest_dir.mkdir(parents=True, exist_ok=True)
+    to_sign_dir.mkdir(parents=True, exist_ok=True)
+    to_gen_dir.mkdir(parents=True, exist_ok=True)
+    gen_dir.mkdir(parents=True, exist_ok=True)
     signed_dir.mkdir(parents=True, exist_ok=True)
-    dist_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Stage 1: Preserve Raw Project Canvas
-    if raw_path:
-        if raw_path.parent.resolve() == raw_dest_dir.resolve():
-            dest_raw = raw_path
-        else:
-            dest_raw = raw_dest_dir / raw_path.name
-            if dest_raw.resolve() != raw_path.resolve():
-                shutil.copyfile(raw_path, dest_raw)
-        if not no_stamp:
-            local_ots = dest_raw.with_name(f"{dest_raw.name}.ots")
-            final_ots = (
-                (target_proofs_dir / proofs_src_name / "raw" / f"{dest_raw.name}.ots")
-                if target_proofs_dir
-                else local_ots
-            )
-            if not final_ots.is_file() or force:
-                log_info(f"Stamping raw canvas '{raw_path.name}' in Bitcoin blockchain...")
-                stamp_media_file(dest_raw, force=True)
-                if target_proofs_dir and local_ots.is_file():
-                    shutil.move(local_ots, final_ots)
-                if final_ots.is_file():
-                    final_ots.chmod(0o444)
-        dest_raw.chmod(0o444)
-        log_ok(f"Raw canvas secured: {dest_raw.name} (0444)")
+    # 2. Stage 1: Preserve and Anchor Raw Project Canvases (raw/)
+    if raw_path and raw_path.parent.resolve() != raw_dest_dir.resolve():
+        dest_raw = raw_dest_dir / raw_path.name
+        if dest_raw.resolve() != raw_path.resolve():
+            shutil.copyfile(raw_path, dest_raw)
+        raw_path = dest_raw
 
-    # 3. Stage 2: Preserve Normalized Master
-    if master_path.parent.resolve() == master_dest_dir.resolve():
-        dest_master = master_path
-    else:
-        dest_master = master_dest_dir / master_path.name
+    if raw_dest_dir.is_dir():
+        raw_files = [
+            f for f in sorted(raw_dest_dir.iterdir())
+            if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+        ]
+        for rf in raw_files:
+            rf.chmod(0o444)
+
+        if not no_stamp and raw_files:
+            raw_to_stamp: list[Path] = []
+            for rf in raw_files:
+                final_ots = (
+                    (target_proofs_dir / proofs_raw_name / f"{rf.name}.ots")
+                    if target_proofs_dir
+                    else rf.with_name(f"{rf.name}.ots")
+                )
+                if not final_ots.is_file() or force:
+                    raw_to_stamp.append(rf)
+
+            if raw_to_stamp:
+                log_info(f"Anchoring raw canvas ({len(raw_to_stamp)} file(s)) in Bitcoin blockchain...")
+                stamp_media_files(raw_to_stamp, force=True)
+                for rf in raw_to_stamp:
+                    local_ots = rf.with_name(f"{rf.name}.ots")
+                    if target_proofs_dir and local_ots.is_file():
+                        final_ots = target_proofs_dir / proofs_raw_name / f"{rf.name}.ots"
+                        shutil.move(local_ots, final_ots)
+                        final_ots.chmod(0o444)
+                    elif local_ots.is_file():
+                        local_ots.chmod(0o444)
+
+        for rf in raw_files:
+            log_ok(f"Raw canvas secured: {rf.name} (0444)")
+
+    # 3. Stage 2: Stage Master in to_sign/to_generate/
+    dest_master = master_path
+    if master_path.parent.resolve() != to_gen_dir.resolve() and (
+        legacy_master_dir is None or master_path.parent.resolve() != legacy_master_dir.resolve()
+    ):
+        dest_master = to_gen_dir / master_path.name
         if dest_master.resolve() != master_path.resolve():
             shutil.copyfile(master_path, dest_master)
-    if not no_stamp:
-        local_ots = dest_master.with_name(f"{dest_master.name}.ots")
-        final_ots = (
-            (target_proofs_dir / proofs_src_name / "master" / f"{dest_master.name}.ots")
-            if target_proofs_dir
-            else local_ots
-        )
-        if not final_ots.is_file() or force:
-            log_info(f"Stamping cropped master '{dest_master.name}' in Bitcoin blockchain...")
-            stamp_media_file(dest_master, force=True)
-            if target_proofs_dir and local_ots.is_file():
-                shutil.move(local_ots, final_ots)
-            if final_ots.is_file():
-                final_ots.chmod(0o444)
     dest_master.chmod(0o444)
-    log_ok(f"Normalized master secured: {dest_master.name} (0444)")
+    log_ok(f"Master image staged: {dest_master.name} (0444)")
 
-    # 4. Stage 3: Render and Sign Showcase Release(s)
-    signed_config = manifest.get(
-        "signed",
-        {"enabled": True, "targets": [{"width": 1024, "height": 1024, "label": "1024"}]},
-    )
-    signed_targets_list = signed_config.get("targets", []) if signed_config.get("enabled", True) else []
-
-    if not signed_targets_list:
-        log_info("Stage 3: Signed showcase release skipped (disabled in manifest).")
-    else:
-        for st in signed_targets_list:
-            lbl = st.get("label", "1024")
-            tw = st["width"]
-            th = st["height"]
-            signed_target = signed_dir / f"{name}_{lbl}_signed.png"
-            log_info(f"Rendering showcase PNG ({tw}x{th}) -> {signed_target.name}...")
-            try:
-                with Image.open(master_path) as pil_master:
-                    showcase_img = pil_master.convert("RGBA")
-                    if (showcase_img.width, showcase_img.height) != (tw, th):
-                        showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
-                    showcase_tmp = target_dir / f".tmp_showcase_{name}_{lbl}.png"
-                    showcase_img.save(showcase_tmp, format="PNG")
-            except Exception as e:
-                log_err(f"Failed to load or resize master image: {e}")
-                sys.exit(1)
-
-            if not no_sign:
-                log_info(f"Cryptographically signing showcase release ({signed_target.name})...")
-                process_signing(
-                    input_path=showcase_tmp,
-                    output_path=signed_target,
-                    stamp=(not no_stamp),
-                    bw_item=bw_item,
-                    use_agent=use_agent,
-                    agent_key_name=agent_key_name,
-                )
-                showcase_tmp.unlink(missing_ok=True)
-                local_showcase_ots = signed_target.with_name(f"{signed_target.name}.ots")
-                if target_proofs_dir and local_showcase_ots.is_file():
-                    final_showcase_ots = target_proofs_dir / proofs_signed_name / f"{signed_target.name}.ots"
-                    shutil.move(local_showcase_ots, final_showcase_ots)
-                    final_showcase_ots.chmod(0o444)
-                log_ok(f"Showcase release signed: {signed_target.name} ({tw}x{th})")
-            else:
-                shutil.move(showcase_tmp, signed_target)
-                log_ok(f"Showcase release saved without signing: {signed_target.name} ({tw}x{th})")
-
-    # 5. Stage 4: Render Multi-Scale Distribution (Dist) from Manifest Targets
-    log_info(f"Rendering distribution assets ({len(targets)} targets) into dist/...")
-
+    # 4. Stage 3: Render Multi-Scale Distribution (generated/) and Batch-Stamp with OTS
+    log_info(f"Rendering distribution assets ({len(targets)} targets) into {gen_dir.name}/...")
+    generated_count = 0
     try:
-        with Image.open(master_path) as pil_master:
+        with Image.open(dest_master) as pil_master:
             rgba_base = pil_master.convert("RGBA")
             is_square = (rgba_base.width == rgba_base.height)
 
@@ -2545,7 +2591,7 @@ def execute_build(
             gen_favicon = manifest.get("generate_favicon", is_square)
             if gen_favicon:
                 ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-                ico_path = dist_dir / "favicon.ico"
+                ico_path = gen_dir / "favicon.ico"
                 if is_square:
                     rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
                 else:
@@ -2554,24 +2600,155 @@ def execute_build(
                     top = (rgba_base.height - sq_dim) // 2
                     crop_sq = rgba_base.crop((left, top, left + sq_dim, top + sq_dim))
                     crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
+                ico_path.chmod(0o444)
+                generated_count += 1
                 log_ok("Rendered multi-resolution favicon.ico (16..256)")
 
-            generated_count = 0
             for t in targets:
                 tw, th = t["width"], t["height"]
                 lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
                 res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
                 if "webp" in formats:
-                    res_img.save(dist_dir / f"{name}_{lbl}.webp", format="WEBP", quality=90, method=6)
+                    out_webp = gen_dir / f"{name}_{lbl}.webp"
+                    res_img.save(out_webp, format="WEBP", quality=90, method=6)
+                    out_webp.chmod(0o444)
                     generated_count += 1
                 if "png" in formats:
-                    res_img.save(dist_dir / f"{name}_{lbl}.png", format="PNG", optimize=True)
+                    out_png = gen_dir / f"{name}_{lbl}.png"
+                    res_img.save(out_png, format="PNG", optimize=True)
+                    out_png.chmod(0o444)
                     generated_count += 1
     except Exception as e:
-        log_err(f"Failed during dist rendering: {e}")
+        log_err(f"Failed during generated rendering: {e}")
         sys.exit(1)
 
-    log_ok(f"Generated {generated_count + (1 if gen_favicon else 0)} distribution files in dist/")
+    log_ok(f"Generated {generated_count} distribution files in {gen_dir.name}/")
+
+    if not no_stamp:
+        gen_files = [
+            f for f in sorted(gen_dir.iterdir())
+            if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
+        ]
+        gen_to_stamp = []
+        for gf in gen_files:
+            gf.chmod(0o444)
+            final_ots = (
+                (target_proofs_dir / proofs_gen_name / f"{gf.name}.ots")
+                if target_proofs_dir
+                else gf.with_name(f"{gf.name}.ots")
+            )
+            if not final_ots.is_file() or force:
+                gen_to_stamp.append(gf)
+
+        if gen_to_stamp:
+            stamp_media_files(gen_to_stamp, force=True)
+            for gf in gen_to_stamp:
+                local_ots = gf.with_name(f"{gf.name}.ots")
+                if target_proofs_dir and local_ots.is_file():
+                    final_ots = target_proofs_dir / proofs_gen_name / f"{gf.name}.ots"
+                    shutil.move(local_ots, final_ots)
+                    final_ots.chmod(0o444)
+                elif local_ots.is_file():
+                    local_ots.chmod(0o444)
+            log_ok(f"Anchored all {len(gen_to_stamp)} generated files in Bitcoin blockchain (OpenTimestamps)")
+
+    # 5. Stage 4: Sign Master Clone and Extra Images into signed/ (C2PA + DWT + OTS)
+    items_to_sign: list[tuple[Path, Path, str]] = []
+
+    # 1. Master clone (full resolution clone from to_generate)
+    items_to_sign.append((dest_master, signed_dir / dest_master.name, f"Master clone ({dest_master.name})"))
+
+    # 2. Additional generator files in to_generate/ (if any)
+    if to_gen_dir.is_dir():
+        for f in sorted(to_gen_dir.iterdir()):
+            if (
+                f.is_file()
+                and not f.name.startswith(".")
+                and not f.name.endswith(".ots")
+                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")
+                and f.resolve() != dest_master.resolve()
+            ):
+                items_to_sign.append((f, signed_dir / f.name, f"Generator master ({f.name})"))
+
+    # 3. Additional files in to_sign/ (excluding subdirectories)
+    if to_sign_dir.is_dir():
+        for f in sorted(to_sign_dir.iterdir()):
+            if (
+                f.is_file()
+                and not f.name.startswith(".")
+                and not f.name.endswith(".ots")
+                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")
+            ):
+                target_dst = signed_dir / f.name
+                if any(dst == target_dst for _, dst, _ in items_to_sign):
+                    log_warn(f"Filename collision for {f.name} in to_sign/, skipping duplicate.")
+                    continue
+                items_to_sign.append((f, target_dst, f"Additional asset ({f.name})"))
+
+    # 4. Optional showcase scale renders from manifest if configured (legacy compatibility)
+    signed_config = manifest.get("signed")
+    if isinstance(signed_config, dict) and signed_config.get("enabled") and signed_config.get("targets"):
+        for st in signed_config["targets"]:
+            lbl = st.get("label", "1024")
+            tw = st["width"]
+            th = st["height"]
+            target_dst = signed_dir / f"{name}_{lbl}_signed.png"
+            if not any(dst == target_dst for _, dst, _ in items_to_sign):
+                showcase_tmp = target_dir / f".tmp_showcase_{name}_{lbl}.png"
+                try:
+                    with Image.open(dest_master) as pil_master:
+                        showcase_img = pil_master.convert("RGBA")
+                        if (showcase_img.width, showcase_img.height) != (tw, th):
+                            showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
+                        showcase_img.save(showcase_tmp, format="PNG")
+                    items_to_sign.append((showcase_tmp, target_dst, f"Showcase release {tw}x{th} ({target_dst.name})"))
+                except Exception as e:
+                    log_warn(f"Could not render legacy showcase target {lbl}: {e}")
+
+    for src_file, dst_file, desc in items_to_sign:
+        is_tmp = src_file.name.startswith(".tmp_")
+        if not no_sign:
+            log_info(f"Cryptographically signing {desc} -> {dst_file.name}...")
+            process_signing(
+                input_path=src_file,
+                output_path=dst_file,
+                stamp=(not no_stamp),
+                bw_item=bw_item,
+                use_agent=use_agent,
+                agent_key_name=agent_key_name,
+            )
+            if is_tmp:
+                src_file.unlink(missing_ok=True)
+            local_ots = dst_file.with_name(f"{dst_file.name}.ots")
+            if target_proofs_dir and local_ots.is_file():
+                final_ots = target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots"
+                shutil.move(local_ots, final_ots)
+                final_ots.chmod(0o444)
+            elif local_ots.is_file():
+                local_ots.chmod(0o444)
+            dst_file.chmod(0o444)
+            log_ok(f"Signed release ready: {dst_file.name} (0444)")
+        else:
+            if src_file.resolve() != dst_file.resolve():
+                shutil.copyfile(src_file, dst_file)
+            if is_tmp:
+                src_file.unlink(missing_ok=True)
+            dst_file.chmod(0o444)
+            if not no_stamp:
+                local_ots = dst_file.with_name(f"{dst_file.name}.ots")
+                final_ots = (
+                    (target_proofs_dir / proofs_signed_name / f"{dst_file.name}.ots")
+                    if target_proofs_dir
+                    else local_ots
+                )
+                if not final_ots.is_file() or force:
+                    stamp_media_file(dst_file, force=True)
+                    if target_proofs_dir and local_ots.is_file():
+                        shutil.move(local_ots, final_ots)
+                        final_ots.chmod(0o444)
+                    elif local_ots.is_file():
+                        local_ots.chmod(0o444)
+            log_ok(f"Release saved without signing: {dst_file.name} (0444)")
 
     # 6. Stage 5: Update 'latest' Symlinks
     latest_symlink = icons_dir / name / "latest"
@@ -2594,9 +2771,10 @@ def execute_build(
             log_warn(f"Could not update proofs symlink 'latest': {e}")
 
     log_head(f"Build Complete for '{name}' ({version})")
-    print(f"  {C_BOLD}Source:{C_RESET}     {src_dir}")
+    print(f"  {C_BOLD}Raw:{C_RESET}        {raw_dest_dir}")
+    print(f"  {C_BOLD}To Sign:{C_RESET}    {to_sign_dir}")
+    print(f"  {C_BOLD}Generated:{C_RESET}  {gen_dir}")
     print(f"  {C_BOLD}Signed:{C_RESET}     {signed_dir}")
-    print(f"  {C_BOLD}Dist:{C_RESET}       {dist_dir}")
     if target_proofs_dir:
         print(f"  {C_BOLD}Proofs:{C_RESET}     {target_proofs_dir}")
     print(f"  {C_BOLD}Active:{C_RESET}     {latest_symlink}\n")
@@ -2857,17 +3035,17 @@ Automation & Keys Examples:
     p_build = subparsers.add_parser("build", help="Build and render an asset version from master")
     p_build.add_argument("name", type=str, help="Asset identifier slug (e.g. duck, logo)")
     p_build.add_argument("version", type=str, help="Version tag (e.g. v1, v2, 2026.1)")
-    p_build.add_argument("-m", "--master", type=Path, default=None, help="Cropped master PNG/WebP (auto-detected in source/master/)")
-    p_build.add_argument("-r", "--raw", type=Path, default=None, help="Project canvas XCF/PSD/SVG (auto-detected in source/raw/)")
+    p_build.add_argument("-m", "--master", type=Path, default=None, help="Cropped master PNG/WebP (auto-detected in to_sign/to_generate/)")
+    p_build.add_argument("-r", "--raw", type=Path, default=None, help="Project canvas XCF/PSD/SVG (auto-detected in raw/)")
     p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
     p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
-    p_build.add_argument("--sizes", type=str, default=None, help="Comma-separated dist resolutions or WxH sizes (overrides manifest.json)")
+    p_build.add_argument("--sizes", type=str, default=None, help="Comma-separated generated resolutions or WxH sizes (overrides manifest.json)")
     p_build.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
     p_build.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Bitwarden item name for C2PA keys")
-    p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA signing of showcase release")
+    p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA & watermark signing (produce unsigned releases)")
     p_build.add_argument("--no-stamp", action="store_true", help="Skip OpenTimestamps Bitcoin anchoring")
-    p_build.add_argument("--force", action="store_true", help="Bypass audit mismatch and re-stamp source files")
+    p_build.add_argument("--force", action="store_true", help="Bypass audit mismatch and re-stamp files")
 
     # Command: audit
     p_audit = subparsers.add_parser("audit", help="Run full non-blocking integrity audit across asset tree")

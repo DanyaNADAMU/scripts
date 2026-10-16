@@ -8,8 +8,8 @@ Unified cryptographic media processing, C2PA attestation, invisible watermarking
 
 ### Core Capabilities:
 * **Triple-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark (DWT-DCT) + OpenTimestamps proof.
-* **Asset Pipeline:** Multi-tier design asset compiler (`source` -> `signed` -> `dist`), aspect-ratio auto-detection (1:1, 16:9, 4:3, etc.), customizable `manifest.json`, multi-scale WebP/PNG rendering, and multi-layer `favicon.ico`.
-* **Zero-Disk Bitwarden Integration:** Load private keys and certificate chains directly from Bitwarden into RAM (`--bw`) with 0 secret bytes written to disk.
+* **Asset Pipeline:** Multi-tier design asset compiler (`raw` + `to_sign/to_generate` -> `generated` + `signed`), aspect-ratio auto-detection (1:1, 16:9, 4:3, etc.), customizable `manifest.json`, multi-scale WebP/PNG rendering, and multi-layer `favicon.ico`.
+* **Zero-Disk Bitwarden Integration:** Load private keys and certificate chains directly from Bitwarden into RAM (`--bw`) or Bitwarden Desktop SSH Agent (`--agent`) with 0 secret bytes written to disk.
 * **Segregated Proofs Architecture:** Automatically isolates `.ots` files into a dedicated library (`Icons-Proofs` / `SEAFILE_PROOFS`), allowing remote servers to sync and upgrade proofs with 100% zero-media exposure.
 * **Non-Blocking Audit:** Diagnostic pass (`media audit`) reporting all SHA-256 mismatches, missing proofs, and orphaned files in a unified report.
 * **Automated Bitcoin Timers:** Built-in systemd user timer automation (`media timer setup`).
@@ -23,26 +23,34 @@ Unified cryptographic media processing, C2PA attestation, invisible watermarking
 └── <asset_name>/
     ├── manifest.json         # (Optional) shared asset manifest
     ├── v1/
-    │   ├── manifest.json     # Target resolutions, signed showcase scales, aspect ratio & favicon config
-    │   ├── source/
-    │   │   ├── raw/          # duck.xcf (0444 + optional .ots)
-    │   │   └── master/       # duck_master.png (0444 + optional .ots)
-    │   ├── signed/
-    │   │   └── duck_1024_signed.png # C2PA + Watermark + optional .ots (1024, 2048, or custom scales)
-    │   └── dist/
-    │       ├── favicon.ico          # Multi-layer 16..256 container (for square assets)
-    │       ├── duck_512.webp / .png # Clean, zero overhead
-    │       ├── duck_256.webp / .png
-    │       └── ... (128, 64, 32 or 1080p, 720p for 16:9)
+    │   ├── manifest.json     # Target resolutions, formats, aspect ratio & favicon config
+    │   ├── raw/              # Project canvases (duck.xcf, etc.) [OTS proof only]
+    │   ├── to_sign/          # Input staging folder [No signatures]
+    │   │   ├── to_generate/  # Master image (master.png, etc.)
+    │   │   └── banner.png    # Additional input images to sign
+    │   ├── generated/        # Web/app renders [Clean + OTS proof only]
+    │   │   ├── favicon.ico
+    │   │   ├── duck_512.webp / .png
+    │   │   ├── duck_256.webp / .png
+    │   │   └── ... (128, 64, 32 or 1080p, 720p for 16:9)
+    │   └── signed/           # Triple-layer signed releases [C2PA + DWT + OTS]
+    │       ├── master.png    # Signed full-resolution clone from to_generate/
+    │       └── banner.png    # Signed extra asset from to_sign/
     └── latest -> v1/
 
 # Segregated Proofs Archive (<Icons-Proofs>/ or $SEAFILE_PROOFS):
 <Icons-Proofs>/
 └── <asset_name>/
     ├── v1/
-    │   ├── source/raw/duck.xcf.ots
-    │   ├── source/master/duck_master.png.ots
-    │   └── signed/duck_1024_signed.png.ots
+    │   ├── raw/duck.xcf.ots
+    │   ├── generated/
+    │   │   ├── favicon.ico.ots
+    │   │   ├── duck_512.webp.ots
+    │   │   ├── duck_512.png.ots
+    │   │   └── duck_256.webp.ots
+    │   └── signed/
+    │       ├── master.png.ots
+    │       └── banner.png.ots
     └── latest -> v1/
 ```
 
@@ -56,7 +64,7 @@ Unified cryptographic media processing, C2PA attestation, invisible watermarking
 # Initialize folder scaffolding and default manifest.json for a new asset version
 media init duck v1
 
-# Auto-detect source files from source/ and compile release
+# Auto-detect master from to_sign/to_generate/, raw canvas from raw/, and compile release
 media build duck v1
 
 # Compile with explicit source paths and Bitwarden signing
