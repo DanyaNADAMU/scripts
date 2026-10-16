@@ -25,6 +25,7 @@ import threading
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Iterator
 
 # ==============================================================================
