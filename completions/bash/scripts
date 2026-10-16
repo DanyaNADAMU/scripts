@@ -40,7 +40,7 @@ _scripts_completions() {
             return 0
             ;;
         *)
-            local options="--scope --category --method --yes --help"
+            local options="--scope --category --method --no-pull --yes --help"
             COMPREPLY=( $(compgen -W "$options" -- "$cur") )
             return 0
             ;;

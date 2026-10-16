@@ -27,6 +27,7 @@ _scripts() {
                         '--scope[Target installation directory]:scope:(user system)' \
                         '--category[Filter by script category]:category:(all server desktop media)' \
                         '--method[Installation method]:method:(link copy)' \
+                        '--no-pull[Skip git pull in local git clone]' \
                         '(-y --yes)'{-y,--yes}'[Run non-interactively, accepting all defaults]' \
                         '(-h --help)'{-h,--help}'[Display help message]'
                     ;;

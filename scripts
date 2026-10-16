@@ -8,13 +8,10 @@
 # ==============================================================================
 set -euo pipefail
 
-GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
-COMMIT_SHA="$(curl -fsSL "https://api.github.com/repos/DanyaNADAMU/scripts/commits/main" 2>/dev/null | grep '"sha"' | head -n 1 | cut -d'"' -f4 || echo "")"
-if [ -n "$COMMIT_SHA" ]; then
-    GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/$COMMIT_SHA"
-fi
 VERSION="1.1.0"
-
+GITHUB_RAW="https://raw.githubusercontent.com/DanyaNADAMU/scripts/main"
+GITHUB_RAW_RESOLVED=""
+COMMIT_SHA=""
 
 # Determine execution context (local repository vs remote/standalone)
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -22,10 +19,95 @@ REPO_DIR="$(cd "$(dirname "$SELF_PATH")" 2>/dev/null && pwd || echo "")"
 
 if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/manifest.txt" ]; then
     IS_LOCAL_REPO=true
+    SOURCE_DIR="$REPO_DIR"
 else
     IS_LOCAL_REPO=false
     REPO_DIR=""
+    SOURCE_DIR=""
 fi
+
+TMP_SOURCE_DIR=""
+CLEANUP_PATHS=()
+
+register_tmp() {
+    CLEANUP_PATHS+=("$1")
+}
+
+cleanup_source() {
+    if [ -n "$TMP_SOURCE_DIR" ] && [ -d "$TMP_SOURCE_DIR" ]; then
+        rm -rf "$TMP_SOURCE_DIR"
+        TMP_SOURCE_DIR=""
+        if [ "$IS_LOCAL_REPO" = false ]; then
+            SOURCE_DIR=""
+        fi
+    fi
+}
+
+cleanup_all() {
+    cleanup_source
+    for p in "${CLEANUP_PATHS[@]}"; do
+        if [ -d "$p" ]; then
+            rm -rf "$p" 2>/dev/null || true
+        elif [ -f "$p" ]; then
+            rm -f "$p" 2>/dev/null || true
+        fi
+    done
+    CLEANUP_PATHS=()
+}
+trap cleanup_all EXIT INT TERM
+
+get_github_raw_url() {
+    if [ -n "$GITHUB_RAW_RESOLVED" ]; then
+        echo "$GITHUB_RAW_RESOLVED"
+        return 0
+    fi
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        GITHUB_RAW_RESOLVED="$GITHUB_RAW"
+        echo "$GITHUB_RAW_RESOLVED"
+        return 0
+    fi
+    if [ -z "$COMMIT_SHA" ]; then
+        COMMIT_SHA="$(curl -fsSL --connect-timeout 2 --max-time 4 "https://api.github.com/repos/DanyaNADAMU/scripts/commits/main" 2>/dev/null | grep '"sha"' | head -n 1 | cut -d'"' -f4 || echo "")"
+    fi
+    if [ -n "$COMMIT_SHA" ]; then
+        GITHUB_RAW_RESOLVED="https://raw.githubusercontent.com/DanyaNADAMU/scripts/$COMMIT_SHA"
+    else
+        GITHUB_RAW_RESOLVED="$GITHUB_RAW"
+    fi
+    echo "$GITHUB_RAW_RESOLVED"
+}
+
+acquire_source() {
+    if [ "$IS_LOCAL_REPO" = true ]; then
+        SOURCE_DIR="$REPO_DIR"
+        return 0
+    fi
+
+    if [ -n "$SOURCE_DIR" ] && [ -d "$SOURCE_DIR" ]; then
+        return 0
+    fi
+
+    TMP_SOURCE_DIR="$(mktemp -d -t scripts-upstream.XXXXXX)"
+    register_tmp "$TMP_SOURCE_DIR"
+
+    local tar_url="https://github.com/DanyaNADAMU/scripts/archive/refs/heads/main.tar.gz"
+    local dl_ok=false
+
+    if command -v tar &>/dev/null; then
+        if curl -fsSL --connect-timeout 5 --max-time 30 "$tar_url" 2>/dev/null | tar -xz --strip-components=1 -C "$TMP_SOURCE_DIR" 2>/dev/null; then
+            if [ -f "$TMP_SOURCE_DIR/manifest.txt" ]; then
+                dl_ok=true
+            fi
+        fi
+    fi
+
+    if [ "$dl_ok" = true ]; then
+        SOURCE_DIR="$TMP_SOURCE_DIR"
+    else
+        log_warn "Snapshot archive download failed; falling back to direct downloads."
+        SOURCE_DIR=""
+    fi
+}
 
 # ------------------------------------------------------------------------------
 # Helpers: I/O and Paths
@@ -91,7 +173,7 @@ check_dependencies() {
             if [ "$scope" = "system" ] || [ "$EUID" -eq 0 ]; then
                 target_dir="/usr/local/bin"
             fi
-            if curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$target_dir" sh; then
+            if curl -LsSf --connect-timeout 5 --max-time 30 https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$target_dir" sh; then
                 export PATH="$target_dir:$PATH"
                 if command -v uv &>/dev/null; then
                     log_ok "'uv' installed successfully into $target_dir."
@@ -273,10 +355,12 @@ fetch_file() {
     local rel_path="$1"
     local dest_file="$2"
 
-    if [ "$IS_LOCAL_REPO" = true ]; then
-        cp -f "$REPO_DIR/$rel_path" "$dest_file"
+    if [ -n "$SOURCE_DIR" ] && [ -f "$SOURCE_DIR/$rel_path" ]; then
+        cp -f "$SOURCE_DIR/$rel_path" "$dest_file"
     else
-        curl -fsSL "$GITHUB_RAW/$rel_path" -o "$dest_file"
+        local base_raw
+        base_raw="$(get_github_raw_url)"
+        curl -fsSL --connect-timeout 4 --max-time 15 "$base_raw/$rel_path" -o "$dest_file"
     fi
 }
 
@@ -290,15 +374,18 @@ install_asset() {
         cmd_prefix="sudo"
     fi
 
-    if [ "$IS_LOCAL_REPO" = true ]; then
-        if [ -f "$REPO_DIR/$rel_src" ]; then
-            $cmd_prefix cp -f "$REPO_DIR/$rel_src" "$target_file"
+    if [ -n "$SOURCE_DIR" ]; then
+        if [ -f "$SOURCE_DIR/$rel_src" ]; then
+            $cmd_prefix cp -f "$SOURCE_DIR/$rel_src" "$target_file"
             $cmd_prefix chmod "$perm" "$target_file" 2>/dev/null || true
         fi
     else
         local tmp_f
-        tmp_f="$(mktemp)"
-        if curl -fsSL "$GITHUB_RAW/$rel_src" -o "$tmp_f" 2>/dev/null && [ -s "$tmp_f" ]; then
+        tmp_f="$(mktemp -t scripts-asset.XXXXXX)"
+        register_tmp "$tmp_f"
+        local base_raw
+        base_raw="$(get_github_raw_url)"
+        if curl -fsSL --connect-timeout 4 --max-time 15 "$base_raw/$rel_src" -o "$tmp_f" 2>/dev/null && [ -s "$tmp_f" ]; then
             $cmd_prefix cp -f "$tmp_f" "$target_file"
             $cmd_prefix chmod "$perm" "$target_file" 2>/dev/null || true
         fi
@@ -336,12 +423,15 @@ install_apt_hook() {
         if [ "$EUID" -ne 0 ]; then
             cmd_prefix="sudo"
         fi
-        if [ "$IS_LOCAL_REPO" = true ] && [ -f "$REPO_DIR/hooks/apt/99scripts" ]; then
-            $cmd_prefix cp -f "$REPO_DIR/hooks/apt/99scripts" "$target"
+        if [ -n "$SOURCE_DIR" ] && [ -f "$SOURCE_DIR/hooks/apt/99scripts" ]; then
+            $cmd_prefix cp -f "$SOURCE_DIR/hooks/apt/99scripts" "$target"
         else
             local tmp_hook
-            tmp_hook="$(mktemp)"
-            if curl -fsSL "$GITHUB_RAW/hooks/apt/99scripts" -o "$tmp_hook" 2>/dev/null && [ -s "$tmp_hook" ]; then
+            tmp_hook="$(mktemp -t scripts-hook.XXXXXX)"
+            register_tmp "$tmp_hook"
+            local base_raw
+            base_raw="$(get_github_raw_url)"
+            if curl -fsSL --connect-timeout 4 --max-time 15 "$base_raw/hooks/apt/99scripts" -o "$tmp_hook" 2>/dev/null && [ -s "$tmp_hook" ]; then
                 $cmd_prefix cp -f "$tmp_hook" "$target"
             else
                 $cmd_prefix tee "$target" >/dev/null << 'EOF'
@@ -368,10 +458,18 @@ uninstall_apt_hook() {
 
 load_manifest() {
     local tmp_manifest="$1"
-    if [ "$IS_LOCAL_REPO" = true ]; then
-        cp -f "$REPO_DIR/manifest.txt" "$tmp_manifest"
+    acquire_source
+    if [ -n "$SOURCE_DIR" ] && [ -f "$SOURCE_DIR/manifest.txt" ]; then
+        cp -f "$SOURCE_DIR/manifest.txt" "$tmp_manifest"
     else
-        if ! curl -fsSL "$GITHUB_RAW/manifest.txt" -o "$tmp_manifest"; then
+        local base_raw
+        base_raw="$(get_github_raw_url)"
+        if curl -fsSL --connect-timeout 4 --max-time 15 "$base_raw/manifest.txt" -o "$tmp_manifest" 2>/dev/null && [ -s "$tmp_manifest" ]; then
+            return 0
+        elif [ -n "${STATE_DIR:-}" ] && [ -f "$STATE_DIR/manifest.txt" ]; then
+            log_warn "Using cached manifest from $STATE_DIR/manifest.txt (network unavailable)."
+            cp -f "$STATE_DIR/manifest.txt" "$tmp_manifest"
+        else
             log_err "Failed to download manifest.txt from upstream repository."
             exit 1
         fi
@@ -401,7 +499,8 @@ cmd_list() {
     set_scope_paths "$scope"
 
     local tmp_m
-    tmp_m="$(mktemp)"
+    tmp_m="$(mktemp -t scripts-list.XXXXXX)"
+    register_tmp "$tmp_m"
     load_manifest "$tmp_m"
 
     log_head "Available and Installed Scripts (Scope: $scope -> $BIN_DIR)"
@@ -425,6 +524,7 @@ cmd_list() {
     done < "$tmp_m"
 
     rm -f "$tmp_m"
+    cleanup_source
     echo ""
 }
 
@@ -445,6 +545,7 @@ cmd_sync() {
             -y|--yes) auto_yes=true; shift ;;
             --update) shift ;;
             --method) method="$2"; shift 2 ;;
+            --no-pull|--offline) shift ;;
             *) shift ;;
         esac
     done
@@ -465,6 +566,9 @@ cmd_sync() {
         else
             method="copy"
         fi
+    elif [ "$method" = "link" ] && [ "$IS_LOCAL_REPO" = false ]; then
+        log_warn "'--method link' is only supported when running within a local git repository clone. Using 'copy'."
+        method="copy"
     fi
 
     check_dependencies "$category" "$auto_yes" "$scope"
@@ -483,7 +587,8 @@ cmd_sync() {
     ensure_write_access "$STATE_DIR"
 
     local current_manifest
-    current_manifest="$(mktemp)"
+    current_manifest="$(mktemp -t scripts-manifest.XXXXXX)"
+    register_tmp "$current_manifest"
     load_manifest "$current_manifest"
 
     local prev_manifest="$STATE_DIR/manifest.txt"
@@ -514,11 +619,12 @@ cmd_sync() {
         old_sha="$(get_sha256 "$target_bin")"
 
         # Install script
-        if [ "$IS_LOCAL_REPO" = true ]; then
-            safe_copy_or_link "$REPO_DIR/$src_path" "$target_bin" "$method" "$NEED_SUDO"
+        if [ -n "$SOURCE_DIR" ]; then
+            safe_copy_or_link "$SOURCE_DIR/$src_path" "$target_bin" "$method" "$NEED_SUDO"
         else
             local tmp_dl
-            tmp_dl="$(mktemp)"
+            tmp_dl="$(mktemp -t scripts-dl.XXXXXX)"
+            register_tmp "$tmp_dl"
             fetch_file "$src_path" "$tmp_dl"
             if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
                 sudo cp --remove-destination -f "$tmp_dl" "$target_bin" 2>/dev/null || sudo cp -f "$tmp_dl" "$target_bin"
@@ -555,11 +661,16 @@ cmd_sync() {
     local old_scripts_sha
     old_scripts_sha="$(get_sha256 "$scripts_bin")"
 
-    if [ "$IS_LOCAL_REPO" = true ]; then
-        safe_copy_or_link "$SELF_PATH" "$scripts_bin" "$method" "$NEED_SUDO"
+    if [ -n "$SOURCE_DIR" ]; then
+        if [ "$IS_LOCAL_REPO" = true ]; then
+            safe_copy_or_link "$SELF_PATH" "$scripts_bin" "$method" "$NEED_SUDO"
+        else
+            safe_copy_or_link "$SOURCE_DIR/scripts" "$scripts_bin" "copy" "$NEED_SUDO"
+        fi
     else
         local tmp_self
-        tmp_self="$(mktemp)"
+        tmp_self="$(mktemp -t scripts-self.XXXXXX)"
+        register_tmp "$tmp_self"
         fetch_file "scripts" "$tmp_self"
         local tmp_dest="${scripts_bin}.tmp.$$"
         if [ "$NEED_SUDO" = true ] && [ "$EUID" -ne 0 ]; then
@@ -659,6 +770,7 @@ cmd_sync() {
         cp -f "$current_manifest" "$prev_manifest"
     fi
     rm -f "$current_manifest"
+    cleanup_source
 
     # Install APT hook if system scope and APT is present
     if [ "$scope" = "system" ] && [ -d "/etc/apt/apt.conf.d" ]; then
@@ -770,7 +882,8 @@ cmd_prune() {
     local manifest_file="$STATE_DIR/manifest.txt"
 
     local tmp_manifest
-    tmp_manifest="$(mktemp)"
+    tmp_manifest="$(mktemp -t scripts-prune.XXXXXX)"
+    register_tmp "$tmp_manifest"
     load_manifest "$tmp_manifest"
 
     local candidates=()
@@ -810,6 +923,7 @@ cmd_prune() {
     done
 
     rm -f "$tmp_manifest"
+    cleanup_source
 
     if [ ${#to_prune[@]} -eq 0 ]; then
         log_head "Pruning Deprecated Utilities ($BIN_DIR)"
@@ -851,7 +965,8 @@ cmd_prune() {
         uninstall_man_and_completions "$item"
         if [ -f "$manifest_file" ] && grep -q ":$item:" "$manifest_file" 2>/dev/null; then
             local tmp_m
-            tmp_m="$(mktemp)"
+            tmp_m="$(mktemp -t scripts-prune-m.XXXXXX)"
+            register_tmp "$tmp_m"
             grep -v ":$item:" "$manifest_file" > "$tmp_m" || true
             $cmd_prefix cp -f "$tmp_m" "$manifest_file"
             rm -f "$tmp_m"
@@ -938,7 +1053,8 @@ cmd_uninstall() {
 
             if [ -f "$manifest_file" ] && grep -q ":$t:" "$manifest_file" 2>/dev/null; then
                 local tmp_m
-                tmp_m="$(mktemp)"
+                tmp_m="$(mktemp -t scripts-uninst-m.XXXXXX)"
+                register_tmp "$tmp_m"
                 grep -v ":$t:" "$manifest_file" > "$tmp_m" || true
                 $cmd_prefix cp -f "$tmp_m" "$manifest_file"
                 rm -f "$tmp_m"
@@ -1115,6 +1231,7 @@ Options:
   --scope SCOPE        Target scope: 'user' (~/.local/bin) or 'system' (/usr/local/bin)
   --category CAT       Filter category: 'all', 'server', 'desktop', 'media'
   --method METHOD      Installation method: 'link' (default for repo) or 'copy'
+  --no-pull            Skip git pull when updating inside local git clone
   -y, --yes            Non-interactive mode; accept all defaults
   -h, --help           Show this help message
 
@@ -1134,8 +1251,15 @@ ACTION="${1:-}"
 
 case "$ACTION" in
     sync|update|install)
+        do_pull=true
+        for arg in "$@"; do
+            if [ "$arg" = "--no-pull" ] || [ "$arg" = "--offline" ]; then
+                do_pull=false
+                break
+            fi
+        done
         # If in local git repo, pull first if possible
-        if [ "$IS_LOCAL_REPO" = true ] && [ -d "$REPO_DIR/.git" ]; then
+        if [ "$do_pull" = true ] && [ "$IS_LOCAL_REPO" = true ] && [ -d "$REPO_DIR/.git" ]; then
             log_head "Pulling latest changes from git repository..."
             git -C "$REPO_DIR" pull --ff-only || log_warn "Git pull failed or offline; proceeding with local files."
         fi
