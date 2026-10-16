@@ -101,6 +101,8 @@ _media() {
                         '1:image file to inspect:_files -g "*.([pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[aA][vV][iI][fF]|[sS][vV][gG]|[tT][iI][fF][fF])"' \
                         '--ots[Detached .ots proof file]:ots file:_files -g "*.ots"' \
                         '(-s --secret)'{-s,--secret}'[Secret passphrase for watermark extraction]:secret:' \
+                        '(--agent --ssh-agent)'{--agent,--ssh-agent}'[Derive watermark secret via SSH Agent (Bitwarden)]' \
+                        '--key-name[SSH key comment in agent (default: c2pa-signer)]:key comment:' \
                         '--bw[Fetch watermark secret from Bitwarden into RAM]::item name:' \
                         '--bw-item[Fetch watermark secret from Bitwarden into RAM]:item name:' \
                         '--json[Output raw verification report in JSON]' \
@@ -120,7 +122,29 @@ _media() {
                         'status:Show timer status'
                         'remove:Disable and remove timer'
                     )
-                    _describe -t timer_cmds 'timer operation' timer_cmds
+                    if (( CURRENT == 2 )); then
+                        if [[ "$words[2]" == -* ]]; then
+                            _arguments '(-h --help)'{-h,--help}'[Display help message]'
+                        else
+                            _describe -t timer_cmds 'timer operation' timer_cmds
+                        fi
+                    else
+                        local subcmd="$words[2]"
+                        shift words
+                        (( CURRENT-- ))
+                        case $subcmd in
+                            setup)
+                                _arguments \
+                                    '1:proofs directory:_files -/' \
+                                    '--interval[Timer interval (default: 2h)]:interval:' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                            status|remove)
+                                _arguments \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                        esac
+                    fi
                     ;;
                 keys)
                     local -a keys_cmds
@@ -131,7 +155,51 @@ _media() {
                         'push:Push local keys to Bitwarden vault as Secure Note'
                         'use:Configure default signing source (agent, Bitwarden item, or local)'
                     )
-                    _describe -t keys_cmds 'keys operation' keys_cmds
+                    if (( CURRENT == 2 )); then
+                        if [[ "$words[2]" == -* ]]; then
+                            _arguments '(-h --help)'{-h,--help}'[Display help message]'
+                        else
+                            _describe -t keys_cmds 'keys operation' keys_cmds
+                        fi
+                    else
+                        local subcmd="$words[2]"
+                        shift words
+                        (( CURRENT-- ))
+                        case $subcmd in
+                            gen)
+                                _arguments \
+                                    '(-d --domain)'{-d,--domain}'[Signing domain]:domain:' \
+                                    '--out-dir[Destination directory for keys]:out dir:_files -/' \
+                                    '(--agent --ssh-agent)'{--agent,--ssh-agent}'[Bind C2PA certificates to SSH Agent key (Bitwarden, 0 disk keys)]' \
+                                    '--key-name[SSH key comment in agent (default: c2pa-signer)]:key comment:' \
+                                    '--bw[Store credentials directly in Bitwarden vault]::item name:' \
+                                    '--bw-item[Store credentials directly in Bitwarden vault]:item name:' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                            show)
+                                _arguments \
+                                    '--bw[Inspect Bitwarden credentials]::item name:' \
+                                    '--bw-item[Inspect Bitwarden credentials]:item name:' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                            export)
+                                _arguments \
+                                    '--bw[Export from Bitwarden vault]::item name:' \
+                                    '--bw-item[Export from Bitwarden vault]:item name:' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                            push)
+                                _arguments \
+                                    '1:Bitwarden item name:' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                            use)
+                                _arguments \
+                                    '1:signing source:(agent ssh-agent local c2pa-signer)' \
+                                    '(-h --help)'{-h,--help}'[Display help message]'
+                                ;;
+                        esac
+                    fi
                     ;;
             esac
             ;;

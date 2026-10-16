@@ -25,7 +25,7 @@ _media_completions() {
             COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|xcf|psd|ai|tiff)" -- "$cur") )
             return 0
             ;;
-        -d|--dir|-p|--proofs-dir|setup)
+        -d|--dir|-p|--proofs-dir|--out-dir)
             COMPREPLY=( $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -84,22 +84,52 @@ _media_completions() {
             ;;
         sign)
             local opts="-o --output --in-place -t --title -a --author -d --domain -m --description -l --license -w --watermark --no-watermark --no-c2pa --stamp -s --secret --agent --ssh-agent --key-name --key --cert --bw --bw-item -h --help"
-            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -W "$opts" -- "$cur") )
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
+            fi
             return 0
             ;;
         verify)
-            local opts="--ots -s --secret --bw --bw-item --json -h --help"
-            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -W "$opts" -- "$cur") )
+            local opts="--ots -s --secret --agent --ssh-agent --key-name --bw --bw-item --json -h --help"
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
+            fi
             return 0
             ;;
         stamp)
             local opts="-f --force --wait -h --help"
-            COMPREPLY=( $(compgen -f -W "$opts" -- "$cur") )
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -f -W "$opts" -- "$cur") )
+            fi
             return 0
             ;;
         timer)
             local subcmds="setup status remove -h --help"
-            COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+            else
+                case "${COMP_WORDS[2]}" in
+                    setup)
+                        if [[ "$cur" == -* ]]; then
+                            COMPREPLY=( $(compgen -W "--interval -h --help" -- "$cur") )
+                        else
+                            COMPREPLY=( $(compgen -d -- "$cur") $(compgen -W "--interval -h --help" -- "$cur") )
+                        fi
+                        ;;
+                    status|remove)
+                        COMPREPLY=( $(compgen -W "-h --help" -- "$cur") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
+                        ;;
+                esac
+            fi
             return 0
             ;;
         keys)
@@ -112,7 +142,13 @@ _media_completions() {
                         COMPREPLY=( $(compgen -W "-d --domain --agent --ssh-agent --key-name --bw --bw-item --out-dir -h --help" -- "$cur") )
                         ;;
                     use)
-                        COMPREPLY=( $(compgen -W "agent ssh-agent local c2pa-signer" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "agent ssh-agent local c2pa-signer -h --help" -- "$cur") )
+                        ;;
+                    show|export)
+                        COMPREPLY=( $(compgen -W "--bw --bw-item -h --help" -- "$cur") )
+                        ;;
+                    push)
+                        COMPREPLY=( $(compgen -W "-h --help" -- "$cur") )
                         ;;
                     *)
                         COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
