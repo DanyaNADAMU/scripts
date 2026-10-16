@@ -1,0 +1,21 @@
+#compdef languagetool-portal
+
+_languagetool_portal() {
+    _arguments \
+        '(-h --help)'{-h,--help}'[Display help message]' \
+        '(-H --host)'{-H,--host}'[Bind host address (default: 127.0.0.1)]:host:' \
+        '(-p --port)'{-p,--port}'[Bind port (default: 8012)]:port:' \
+        '(-f --users-file)'{-f,--users-file}'[Path to LanguageTool users.txt]:users file:_files' \
+        '(-u --server-url)'{-u,--server-url}'[Public LanguageTool URL for Obsidian]:url:' \
+        '--in-place[Write users.txt in-place with flock to preserve inode]' \
+        '--setup-service[Install, enable, and start systemd service]' \
+        '--remove-service[Disable, stop, and remove systemd service]' \
+        '--status[Check portal HTTP healthcheck and systemd status]' \
+        '--print-service[Print systemd unit file content to stdout]' \
+        '--user[Force user-level systemd service (~/.config/systemd/user)]' \
+        '--system[Force system-level service (/etc/systemd/system)]' \
+        '--run-as[Specify user account for system service]:user:_users' \
+        '(-v --version)'{-v,--version}'[Show version information]'
+}
+
+_languagetool_portal "$@"

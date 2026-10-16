@@ -1,0 +1,25 @@
+# Bash completion for languagetool-portal
+_languagetool_portal_completions() {
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    case "$prev" in
+        -f|--users-file)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+        --run-as)
+            COMPREPLY=( $(compgen -u -- "$cur") )
+            return 0
+            ;;
+        -H|--host|-p|--port|-u|--server-url)
+            return 0
+            ;;
+    esac
+
+    if [ "$COMP_CWORD" -ge 1 ]; then
+        COMPREPLY=( $(compgen -W "-h --help -H --host -p --port -f --users-file -u --server-url --in-place --setup-service --remove-service --status --print-service --user --system --run-as -v --version" -- "$cur") )
+    fi
+}
+complete -F _languagetool_portal_completions languagetool-portal

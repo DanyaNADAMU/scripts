@@ -5,6 +5,7 @@ Scripts designed for Linux server administration, user management, container dae
 ## Contents
 * [`setup_user.sh`](./setup_user.sh) — Provision a new Linux user with Zsh, SSH keys, lingering, and rootless Podman.
 * [`backup_seafile.sh`](./backup_seafile.sh) — Resilient encrypted incremental backup from Seafile (via WebDAV or local mount) to Google Drive via Rclone.
+* [`languagetool_portal.py`](./languagetool_portal.py) — Self-service token portal for LanguageTool integrated with Authentik Forward Auth.
 
 ---
 
@@ -86,3 +87,92 @@ filename_encryption = standard
 directory_name_encryption = true
 password = <encrypted_password>
 ```
+
+---
+
+### `languagetool-portal`
+Lightweight, zero-dependency self-service token portal for LanguageTool and Authentik Forward Auth.
+
+Generates and rotates personal LanguageTool API tokens for Authentik users, updating `users.txt` dynamically without requiring server or container restarts.
+
+#### Features
+* **Zero Dependencies:** Written purely with the standard Python 3.10+ library (`http.server`, `secrets`, `os`, `tempfile`, `fcntl`, `threading`).
+* **Loopback & Forward Auth:** Listens on `127.0.0.1:8012` by default. Authenticates requests via HAProxy's `X-authentik-username` header and rejects direct non-proxy access with `401 Unauthorized`.
+* **Reliable Concurrency:** Protected with thread locks and `fcntl.flock` file locking to guarantee data integrity across concurrent requests.
+* **Offline UI:** Dracula/GitHub Dark themed UI with embedded SVGs, quick-copy buttons (`Copied!`), confirmation dialogs, and Obsidian setup steps.
+* **Monitoring:** Provides `GET /healthz` endpoint returning `200 OK` for HAProxy health checks without authentication.
+
+#### Usage
+
+```bash
+# Run interactively (default: 127.0.0.1:8012, users file: ~/stacks/languagetool/data/users.txt)
+languagetool-portal
+
+# Run as unprivileged user (e.g. 'apps') with custom path
+languagetool-portal --users-file /home/apps/stacks/languagetool/data/users.txt
+
+# Check HTTP health and systemd status
+languagetool-portal --status
+
+# Install and start as a systemd user service (for current user, e.g. apps)
+languagetool-portal --setup-service
+
+# Or install system-wide running as user 'apps' (requires sudo)
+sudo languagetool-portal --setup-service --system --run-as apps
+
+# Remove systemd service
+languagetool-portal --remove-service
+```
+
+#### Docker & Podman Quadlet Inode Pitfall
+
+LanguageTool monitors `users.txt` via `file.lastModified()` and updates its in-memory user table on the fly when the file changes.
+
+When deploying LanguageTool in containers (Podman/Docker), take note of how files are mounted:
+
+##### Option 1 (Recommended): Mount the directory
+Mount the parent directory rather than the single file:
+```ini
+# Quadlet container file (.container)
+Volume=%h/stacks/languagetool/data:/LanguageTool/data:ro,Z
+```
+And in `config.properties`:
+```properties
+passwortLoginAccessListPath=/LanguageTool/data/users.txt
+```
+*Why this is best:* The portal's default atomic replacement (`tempfile` + `os.replace`) changes the file's inode. When the parent directory is mounted, Linux VFS notifies the container immediately of the new file version and timestamp.
+
+##### Option 2: Single-file mount with `--in-place`
+If you bind-mount the individual file directly:
+```ini
+Volume=%h/stacks/languagetool/data/users.txt:/LanguageTool/users.txt:ro,Z
+```
+A Linux bind mount pins the container to the **original inode**. If `os.replace` creates a new inode, the container will remain pinned to the unlinked old inode.
+To solve this, run the portal with `--in-place` (or `LT_IN_PLACE=true`):
+```bash
+languagetool-portal --in-place
+```
+This forces direct in-place updates via `open(..., "r+")` and `fcntl.flock`, maintaining the original inode.
+
+#### HAProxy Forward Auth Configuration Example
+
+```haproxy
+frontend fe_languagetool
+    bind :443 ssl crt /etc/ssl/certs/lt.nada.mu.pem
+    acl is_portal path_beg /portal
+
+    # Check authentication with Authentik forward auth endpoint
+    http-request lua.authentik-auth if is_portal
+
+    # Forward to token portal backend
+    use_backend be_lt_portal if is_portal
+    default_backend be_lt_api
+
+backend be_lt_portal
+    http-request set-header X-Forwarded-Host %[req.hdr(Host)]
+    server lt_portal 127.0.0.1:8012 check inter 5s
+
+backend be_lt_api
+    server lt_app 127.0.0.1:8010 check inter 5s
+```
+

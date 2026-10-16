@@ -29,7 +29,8 @@ scripts/
 │
 ├── server/                  # Server-side administration & provisioning
 │   ├── setup_user.sh        # Linux user provisioning with rootless Podman
-│   └── backup_seafile.sh    # Resilient encrypted Seafile to Google Drive backup
+│   ├── backup_seafile.sh    # Resilient encrypted Seafile to Google Drive backup
+│   └── languagetool_portal.py # Self-service token portal for LanguageTool & Authentik
 │
 ├── desktop/                 # Workstation & desktop environment scripts
 │   ├── backup_seadrive.sh   # Automated encrypted SeaDrive to Google Drive backup
@@ -136,5 +137,6 @@ Rich argument and flag completions (`setup-user --<Tab>`, `scripts <Tab>`) are i
 | `backup-seafile` | `server/backup_seafile.sh` | **Server** | Automated encrypted incremental backup from Seafile (WebDAV/FUSE) to Google Drive. | Bash, `rclone`, `systemd` |
 | `backup-seadrive` | `desktop/backup_seadrive.sh` | **Desktop** | Automated encrypted incremental backup from SeaDrive to Google Drive via Rclone. | Bash, `rclone`, `systemd` |
 | `keylight` | `desktop/keylight.py` | **Desktop** | Ultra-low latency keyboard RGB profile switcher via OpenRGB SDK socket. | Python $\ge$ 3.10, `uv`, OpenRGB |
+| `languagetool-portal` | `server/languagetool_portal.py` | **Server** | Self-service token portal for LanguageTool with Authentik forward auth. | Python $\ge$ 3.10 (standard library only) |
 | `media` | `media/media.py` | **Media** | Unified media lifecycle: C2PA attestation, DWT steganography, Bitcoin timestamps & asset packaging. | Python $\ge$ 3.11, `uv` |
 

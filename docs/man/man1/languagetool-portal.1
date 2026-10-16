@@ -1,0 +1,161 @@
+.TH LANGUAGETOOL-PORTAL 1 "October 2026" "scripts" "User Commands"
+.SH NAME
+languagetool-portal \- self-service token portal for LanguageTool with Authentik forward auth
+.SH SYNOPSIS
+.B languagetool-portal
+[\fB\-h\fR|\fB\-\-help\fR]
+[\fB\-H\fR|\fB\-\-host\fR \fIHOST\fR]
+[\fB\-p\fR|\fB\-\-port\fR \fIPORT\fR]
+[\fB\-f\fR|\fB\-\-users-file\fR \fIPATH\fR]
+[\fB\-u\fR|\fB\-\-server-url\fR \fIURL\fR]
+[\fB\-\-in-place\fR]
+[\fB\-\-setup-service\fR]
+[\fB\-\-remove-service\fR]
+[\fB\-\-status\fR]
+[\fB\-\-print-service\fR]
+[\fB\-\-user\fR|\fB\-\-system\fR]
+[\fB\-\-run-as\fR \fIUSER\fR]
+[\fB\-v\fR|\fB\-\-version\fR]
+.SH DESCRIPTION
+\fBlanguagetool-portal\fR is a lightweight, zero-dependency autonomous HTTP service for managing and rotating personal LanguageTool API tokens. It is built strictly on the Python 3 standard library.
+.PP
+The portal is designed to operate behind a reverse proxy (such as HAProxy) configured with Authentik Forward Auth. Authentik validates user sessions and passes the authenticated identity in the \fBX-authentik-username\fR header.
+.PP
+Key features:
+.IP \(bu 2
+\fBAutomated Onboarding:\fR When an authenticated user accesses the portal for the first time, a cryptographically secure 32-character hexadecimal token (\fBsecrets.token_hex(16)\fR) is generated and stored in \fBusers.txt\fR.
+.IP \(bu 2
+\fBIdempotence & Rotation:\fR Reloading the portal displays the current token without regenerating. Clicking "Сгенерировать новый ключ" invalidates the previous token and generates a new one.
+.IP \(bu 2
+\fBAtomic & In-Place Writes:\fR Safely updates \fBusers.txt\fR using temporary files and \fBos.replace\fR or direct in-place modification protected by \fBfcntl.flock\fR.
+.IP \(bu 2
+\fBSanitization:\fR Rigorously validates usernames to prevent file format injection (colons, newlines, control characters).
+.IP \(bu 2
+\fBOk/Healthcheck:\fR Provides \fBGET /healthz\fR returning \fB200 OK\fR for HAProxy health checks without authentication.
+.IP \(bu 2
+\fBSelf-Contained Dark UI:\fR Modern Dracula/GitHub Dark themed UI with no external CDN or web dependencies (fonts/icons are fully embedded). Includes one-click copy buttons and Obsidian setup instructions.
+.SH DOCKER & PODMAN INODE CAVEAT
+LanguageTool re-reads \fBusers.txt\fR on the fly by monitoring the file's modification time (\fBlastModified\fR).
+.PP
+When deploying LanguageTool in containers (e.g. via Podman Quadlet or Docker), avoid mounting the single file directly:
+.PP
+.nf
+  # AVOID: Linux bind-mount attaches to a specific host inode
+  Volume=%h/stacks/languagetool/data/users.txt:/LanguageTool/users.txt:ro,Z
+.fi
+.PP
+With atomic \fBos.replace\fR, a new host inode is allocated, causing container bind mounts of single files to become disconnected from updates.
+.PP
+.B Recommended Solution:
+Mount the parent directory instead:
+.PP
+.nf
+  Volume=%h/stacks/languagetool/data:/LanguageTool/data:ro,Z
+.fi
+.PP
+And configure LanguageTool's \fBconfig.properties\fR:
+.PP
+.nf
+  passwortLoginAccessListPath=/LanguageTool/data/users.txt
+.fi
+.PP
+If you must mount a single file, run \fBlanguagetool-portal\fR with \fB\-\-in-place\fR (or \fBLT_IN_PLACE=true\fR) so the script overwrites the file without altering its inode.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Displays usage information and exits.
+.TP
+.BR \-H ", " \-\-host " \fIHOST\fR"
+Listening network interface (default: \fB127.0.0.1\fR).
+.TP
+.BR \-p ", " \-\-port " \fIPORT\fR"
+Listening port (default: \fB8012\fR).
+.TP
+.BR \-f ", " \-\-users-file " \fIPATH\fR"
+Path to LanguageTool user credentials file (default: \fB~/stacks/languagetool/data/users.txt\fR).
+.TP
+.BR \-u ", " \-\-server-url " \fIURL\fR"
+Public LanguageTool API endpoint shown in the portal UI (default: \fBhttps://lt.nada.mu/v2\fR).
+.TP
+.B \-\-in-place
+Modifies \fBusers.txt\fR in-place using \fBfcntl.flock\fR, keeping the file inode unchanged for container single-file mounts.
+.TP
+.B \-\-setup-service
+Installs, enables, and starts the systemd service (\fBlanguagetool-portal.service\fR). Defaults to user service if unprivileged, or system service if root.
+.TP
+.B \-\-remove-service
+Stops, disables, and deletes the systemd service.
+.TP
+.B \-\-status
+Performs an HTTP healthcheck against the portal, checks \fBusers.txt\fR stats, and inspects systemd service state.
+.TP
+.B \-\-print-service
+Prints the systemd unit file content to stdout and exits.
+.TP
+.B \-\-user
+Forces installation/removal of user-level systemd service (\fB~/.config/systemd/user\fR).
+.TP
+.B \-\-system
+Forces installation/removal of system-level service (\fB/etc/systemd/system\fR).
+.TP
+.BR \-\-run-as " \fIUSER\fR"
+Specifies the system user account for the systemd unit when installing system-wide (default: \fBapps\fR).
+.TP
+.BR \-v ", " \-\-version
+Displays program version and exits.
+.SH ENVIRONMENT VARIABLES
+.TP
+.B LT_PORTAL_HOST
+Listening interface (default: \fB127.0.0.1\fR).
+.TP
+.B LT_PORTAL_PORT
+Listening port (default: \fB8012\fR).
+.TP
+.B LT_USERS_FILE
+Path to \fBusers.txt\fR (default: \fB~/stacks/languagetool/data/users.txt\fR).
+.TP
+.B LT_SERVER_URL
+Public LanguageTool endpoint (default: \fBhttps://lt.nada.mu/v2\fR).
+.TP
+.B LT_IN_PLACE
+Enable in-place writing when set to \fBtrue\fR or \fB1\fR.
+.SH ENDPOINTS
+.TP
+.B GET /
+Renders portal UI for authenticated user from \fBX-authentik-username\fR. Returns 401 if header is absent.
+.TP
+.B POST /
+Regenerates user API token and issues a 303 See Other redirect to \fBGET /\fR.
+.TP
+.B GET /healthz
+Monitoring healthcheck. Returns \fB200 OK\fR (\fBOK\en\fR). No authentication required.
+.SH EXAMPLES
+.PP
+Run portal interactively on default loopback port 8012:
+.PP
+.nf
+  languagetool-portal
+.fi
+.PP
+Run as user \fBapps\fR with custom file path:
+.PP
+.nf
+  languagetool-portal --users-file /home/apps/stacks/languagetool/data/users.txt
+.fi
+.PP
+Install and start as a systemd user service:
+.PP
+.nf
+  languagetool-portal --setup-service
+.fi
+.PP
+Check health and service status:
+.PP
+.nf
+  languagetool-portal --status
+.fi
+.SH AUTHORS
+Maintained by DanyaNADAMU <git@nada.mu>.
+.SH SEE ALSO
+.BR scripts (1),
+.BR systemctl (1)

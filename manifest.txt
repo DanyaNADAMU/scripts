@@ -7,4 +7,5 @@ server/backup_seafile.sh:backup-seafile:server:Encrypted incremental backup from
 media/media.py:media:media:Media asset pipeline, C2PA attestation & Bitcoin OpenTimestamps lifecycle
 desktop/backup_seadrive.sh:backup-seadrive:desktop:Encrypted incremental backup from SeaDrive to Google Drive via Rclone
 desktop/keylight.py:keylight:desktop:High-performance keyboard RGB backlight profile switcher using OpenRGB SDK
+server/languagetool_portal.py:languagetool-portal:server:Self-service token portal for LanguageTool with Authentik forward auth
 
