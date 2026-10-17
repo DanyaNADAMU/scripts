@@ -9,6 +9,7 @@
 #     "pywavelets>=1.6.0",
 #     "scipy>=1.13.0",
 #     "opentimestamps-client>=0.7.1",
+#     "resvg-py>=0.2.0",
 # ]
 # ///
 # ==============================================================================
@@ -39,6 +40,7 @@ import socket
 import struct
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 from typing import Any
@@ -110,6 +112,72 @@ def log_err(msg: str) -> None:
 
 def log_head(msg: str) -> None:
     print(f"\n{C_CYAN}==>{C_RESET} {C_BOLD}{msg}{C_RESET}")
+
+
+# ------------------------------------------------------------------------------
+# Vector Asset Utilities (SVG Inspection & Rasterization)
+# ------------------------------------------------------------------------------
+def get_svg_dimensions(svg_path: Path) -> tuple[int, int]:
+    """Extracts width and height or aspect ratio dimensions from an SVG file."""
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+        vb = root.attrib.get("viewBox") or root.attrib.get("viewbox")
+        if vb:
+            parts = [float(p) for p in re.split(r"[\s,]+", vb.strip()) if p]
+            if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
+                return int(round(parts[2])), int(round(parts[3]))
+
+        def _parse_val(val: str | None) -> float | None:
+            if not val:
+                return None
+            m = re.match(r"^([\d.]+)", val.strip())
+            return float(m.group(1)) if m else None
+
+        w = _parse_val(root.attrib.get("width"))
+        h = _parse_val(root.attrib.get("height"))
+        if w and h:
+            return int(round(w)), int(round(h))
+    except Exception as e:
+        log_warn(f"Failed to inspect SVG dimensions for {svg_path.name}: {e}")
+    return 0, 0
+
+
+def render_svg_to_image(svg_path: Path, width: int, height: int) -> Image.Image:
+    """Renders an SVG vector asset directly to a PIL RGBA Image at exact pixel dimensions."""
+    # 1. Preferred: resvg-py (standalone Rust engine, zero C library requirements)
+    try:
+        import resvg_py
+        png_bytes = resvg_py.svg_to_bytes(svg_path=str(svg_path), width=width, height=height)
+        return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    except ImportError:
+        pass
+    except Exception as e:
+        log_warn(f"resvg-py rendering failed for {svg_path.name}: {e}")
+
+    # 2. Fallback: cairosvg (requires libcairo-2 system library)
+    try:
+        import cairosvg
+        png_bytes = cairosvg.svg2png(url=str(svg_path), output_width=width, output_height=height)
+        return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    except ImportError:
+        pass
+    except Exception as e:
+        log_warn(f"cairosvg rendering failed for {svg_path.name}: {e}")
+
+    # 3. Fallback: rsvg-convert CLI utility
+    if shutil.which("rsvg-convert"):
+        try:
+            cmd = ["rsvg-convert", "-w", str(width), "-h", str(height), "-f", "png", str(svg_path)]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return Image.open(io.BytesIO(res.stdout)).convert("RGBA")
+        except Exception as e:
+            log_warn(f"rsvg-convert CLI failed for {svg_path.name}: {e}")
+
+    raise RuntimeError(
+        f"Unable to rasterize SVG '{svg_path.name}'. "
+        f"Please install 'resvg-py' (recommended via uv) or install 'librsvg2-bin' (rsvg-convert)."
+    )
 
 
 # ------------------------------------------------------------------------------
@@ -1742,7 +1810,8 @@ def process_signing(
             wm_secret = get_default_secret()
 
     # Stage 1: Embed DWT-DCT Steganographic Watermark
-    if not no_watermark:
+    is_svg = input_path.suffix.lower() == ".svg"
+    if not no_watermark and not is_svg:
         try:
             with Image.open(input_path) as pil_img:
                 log_info(f"Stage 1: Embedding invisible DWT-DCT watermark ('{wm_text}')...")
@@ -1769,7 +1838,10 @@ def process_signing(
             log_err(f"Steganographic watermarking failed: {e}")
             sys.exit(1)
     else:
-        log_info("Stage 1: Invisible watermarking disabled (--no-watermark).")
+        if is_svg and not no_watermark:
+            log_info("Stage 1: Steganography skipped (not applicable to vector XML format).")
+        else:
+            log_info("Stage 1: Invisible watermarking disabled (--no-watermark).")
         if input_path.resolve() != output_path.resolve():
             if output_path.is_file():
                 output_path.unlink()
@@ -1832,11 +1904,13 @@ def process_signing(
     log_ok(f"Ready: {output_path} ({output_path.stat().st_size:,} bytes)\n")
 
 
-def echo_summary(has_c2pa: bool, has_wm: bool, ots_status: str | None = None) -> None:
+def echo_summary(has_c2pa: bool, has_wm: bool, ots_status: str | None = None, is_vector: bool = False) -> None:
     print(f"\n  {C_BOLD}Summary Verdict:{C_RESET}")
     ots_valid = (ots_status in ("confirmed", "pending"))
 
-    if has_c2pa and has_wm and ots_valid:
+    if is_vector and has_c2pa and ots_valid:
+        print(f"    {C_GREEN}★ Dual-Layer Vector Attestation Verified (C2PA + OpenTimestamps; Steganography N/A for SVG).{C_RESET}\n")
+    elif has_c2pa and has_wm and ots_valid:
         print(f"    {C_GREEN}★ Full Triple-Layer Attestation Verified (C2PA + Steganography + OpenTimestamps).{C_RESET}\n")
     elif has_c2pa and has_wm:
         print(f"    {C_GREEN}★ Dual-Layer Provenance Verified (C2PA Manifest + Invisible Watermark).{C_RESET}\n")
@@ -1870,6 +1944,8 @@ def inspect_image(
 
     if not as_json:
         log_head(f"Media Verification: {image_path.name}")
+
+    is_svg = (image_path.suffix.lower() == ".svg")
 
     # 1. Verify C2PA Manifest (Stage 1)
     c2pa_data: dict[str, Any] | None = None
@@ -1908,11 +1984,14 @@ def inspect_image(
     wm_repeats = int(cfg.get("watermark_repeats", 3))
     detected_wm: str | None = None
 
-    try:
-        with Image.open(image_path) as pil_img:
-            detected_wm = extract_dwt_watermark(pil_img, secret=wm_secret, repeats=wm_repeats)
-    except Exception as e:
-        log_warn(f"Watermark scan error: {e}")
+    if is_svg:
+        detected_wm = None
+    else:
+        try:
+            with Image.open(image_path) as pil_img:
+                detected_wm = extract_dwt_watermark(pil_img, secret=wm_secret, repeats=wm_repeats)
+        except Exception as e:
+            log_warn(f"Watermark scan error: {e}")
 
     # 3. Verify OpenTimestamps Proof (Stage 3)
     ots_data = inspect_ots_proof(image_path, ots_path=ots_path)
@@ -1920,6 +1999,7 @@ def inspect_image(
     if as_json:
         result = {
             "file": str(image_path),
+            "format": "svg" if is_svg else "raster",
             "c2pa": c2pa_data,
             "c2pa_validation": c2pa_val_str,
             "invisible_watermark": detected_wm,
@@ -1958,7 +2038,9 @@ def inspect_image(
         print(f"    {C_YELLOW}⚠ No embedded C2PA Content Credentials manifest found.{C_RESET}")
 
     print(f"\n  {C_BOLD}--- LEVEL 2: DWT-DCT Steganographic Watermark ---{C_RESET}")
-    if detected_wm:
+    if is_svg:
+        print(f"    {C_BLUE}ℹ N/A (Vector XML asset; pixel-domain steganography not applicable){C_RESET}")
+    elif detected_wm:
         print(f"    {C_GREEN}✓ Watermark Decoded:{C_RESET} \"{C_BOLD}{detected_wm}{C_RESET}\"")
         print(f"      Robustness: Frequency domain resilient against crop, resize, and re-compression.")
     else:
@@ -1993,6 +2075,7 @@ def inspect_image(
         has_c2pa=bool(c2pa_data),
         has_wm=bool(detected_wm),
         ots_status=ots_data.get("status") if ots_data else None,
+        is_vector=is_svg,
     )
 
 
@@ -2278,7 +2361,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         f'  "generate_favicon": {gen_favicon_str},',
         "",
         '  // Distribution Formats (rendered into generated/):',
-        '  // Supported: ["webp", "png"]',
+        '  // Supported: ["webp", "png", "svg"]',
         f'  "formats": [{formats_str}],',
         "",
         '  // Distribution Resolutions (rendered into generated/):',
@@ -2348,11 +2431,14 @@ def load_or_resolve_manifest(
     # Inspect master image dimensions if available
     master_w, master_h = 0, 0
     if master_path and master_path.is_file():
-        try:
-            with Image.open(master_path) as img:
-                master_w, master_h = img.size
-        except Exception:
-            pass
+        if master_path.suffix.lower() == ".svg":
+            master_w, master_h = get_svg_dimensions(master_path)
+        else:
+            try:
+                with Image.open(master_path) as img:
+                    master_w, master_h = img.size
+            except Exception:
+                pass
 
     # If manifest is empty or aspect_ratio was "auto", compute from master
     if not manifest:
@@ -2918,7 +3004,7 @@ def execute_build(
                 f for f in sorted(to_gen_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
             if img_cands:
                 master_path = img_cands[0]
                 log_info(f"Auto-detected master image: {master_path.name}")
@@ -2930,7 +3016,7 @@ def execute_build(
                 f for f in sorted(legacy_master_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
             if img_cands:
                 master_path = img_cands[0]
                 log_info(f"Auto-detected master image (legacy): {master_path.name}")
@@ -2942,7 +3028,7 @@ def execute_build(
                 f for f in sorted(to_sign_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")]
+            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
             if img_cands:
                 master_path = img_cands[0]
                 log_info(f"Auto-detected master image in to_sign/: {master_path.name}")
@@ -3158,12 +3244,13 @@ def execute_build(
     # 4. Stage 3: Render Multi-Scale Distribution (generated/) and Batch-Stamp with OTS
     log_info(f"Rendering distribution assets ({len(targets)} targets) into {gen_dir.name}/...")
     generated_count = 0
+    is_vector = (dest_master.suffix.lower() == ".svg")
     try:
-        with Image.open(dest_master) as pil_master:
-            rgba_base = pil_master.convert("RGBA")
-            is_square = (rgba_base.width == rgba_base.height)
+        if is_vector:
+            svg_w, svg_h = get_svg_dimensions(dest_master)
+            is_square = (svg_w == svg_h) if (svg_w > 0 and svg_h > 0) else True
 
-            # Multi-layer favicon.ico container
+            # Multi-layer favicon.ico container from SVG
             gen_favicon = manifest.get("generate_favicon", is_square)
             if gen_favicon:
                 ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
@@ -3171,21 +3258,25 @@ def execute_build(
                 if ico_path.is_file():
                     ico_path.unlink()
                 if is_square:
-                    rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
+                    ico_layers = [render_svg_to_image(dest_master, iw, ih) for iw, ih in ico_sizes]
+                    ico_layers[-1].save(ico_path, format="ICO", sizes=ico_sizes, append_images=ico_layers[:-1])
                 else:
-                    sq_dim = min(rgba_base.width, rgba_base.height)
-                    left = (rgba_base.width - sq_dim) // 2
-                    top = (rgba_base.height - sq_dim) // 2
-                    crop_sq = rgba_base.crop((left, top, left + sq_dim, top + sq_dim))
+                    base_dim = max(svg_w, svg_h) if (svg_w > 0 and svg_h > 0) else 512
+                    sq_render = render_svg_to_image(dest_master, base_dim, base_dim)
+                    sq_dim = min(sq_render.width, sq_render.height)
+                    left = (sq_render.width - sq_dim) // 2
+                    top = (sq_render.height - sq_dim) // 2
+                    crop_sq = sq_render.crop((left, top, left + sq_dim, top + sq_dim))
                     crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
                 ico_path.chmod(0o444)
                 generated_count += 1
                 log_ok("Rendered multi-resolution favicon.ico (16..256)")
 
+            # Render raster targets directly from vector for razor-sharp edge precision
             for t in targets:
                 tw, th = t["width"], t["height"]
                 lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
-                res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
+                res_img = render_svg_to_image(dest_master, tw, th)
                 if "webp" in formats:
                     out_webp = gen_dir / f"{name}_{lbl}.webp"
                     if out_webp.is_file():
@@ -3200,6 +3291,60 @@ def execute_build(
                     res_img.save(out_png, format="PNG", optimize=True)
                     out_png.chmod(0o444)
                     generated_count += 1
+
+            # Export distribution SVG asset
+            if "svg" in formats or is_vector:
+                out_svg = gen_dir / f"{name}.svg"
+                if out_svg.resolve() != dest_master.resolve():
+                    if out_svg.is_file():
+                        out_svg.unlink()
+                    shutil.copyfile(dest_master, out_svg)
+                out_svg.chmod(0o444)
+                generated_count += 1
+                log_ok(f"Exported distribution vector asset: {out_svg.name}")
+
+        else:
+            with Image.open(dest_master) as pil_master:
+                rgba_base = pil_master.convert("RGBA")
+                is_square = (rgba_base.width == rgba_base.height)
+
+                # Multi-layer favicon.ico container
+                gen_favicon = manifest.get("generate_favicon", is_square)
+                if gen_favicon:
+                    ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+                    ico_path = gen_dir / "favicon.ico"
+                    if ico_path.is_file():
+                        ico_path.unlink()
+                    if is_square:
+                        rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
+                    else:
+                        sq_dim = min(rgba_base.width, rgba_base.height)
+                        left = (rgba_base.width - sq_dim) // 2
+                        top = (rgba_base.height - sq_dim) // 2
+                        crop_sq = rgba_base.crop((left, top, left + sq_dim, top + sq_dim))
+                        crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
+                    ico_path.chmod(0o444)
+                    generated_count += 1
+                    log_ok("Rendered multi-resolution favicon.ico (16..256)")
+
+                for t in targets:
+                    tw, th = t["width"], t["height"]
+                    lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
+                    res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
+                    if "webp" in formats:
+                        out_webp = gen_dir / f"{name}_{lbl}.webp"
+                        if out_webp.is_file():
+                            out_webp.unlink()
+                        res_img.save(out_webp, format="WEBP", quality=90, method=6)
+                        out_webp.chmod(0o444)
+                        generated_count += 1
+                    if "png" in formats:
+                        out_png = gen_dir / f"{name}_{lbl}.png"
+                        if out_png.is_file():
+                            out_png.unlink()
+                        res_img.save(out_png, format="PNG", optimize=True)
+                        out_png.chmod(0o444)
+                        generated_count += 1
     except Exception as e:
         log_err(f"Failed during generated rendering: {e}")
         sys.exit(1)
@@ -3249,7 +3394,7 @@ def execute_build(
                 f.is_file()
                 and not f.name.startswith(".")
                 and not f.name.endswith(".ots")
-                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")
+                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")
                 and f.resolve() != dest_master.resolve()
             ):
                 items_to_sign.append((f, signed_dir / f.name, f"Generator master ({f.name})"))
@@ -3261,7 +3406,7 @@ def execute_build(
                 f.is_file()
                 and not f.name.startswith(".")
                 and not f.name.endswith(".ots")
-                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg")
+                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")
             ):
                 target_dst = signed_dir / f.name
                 if any(dst == target_dst for _, dst, _ in items_to_sign):
@@ -3280,10 +3425,13 @@ def execute_build(
             if not any(dst == target_dst for _, dst, _ in items_to_sign):
                 showcase_tmp = target_dir / f".tmp_showcase_{name}_{lbl}.png"
                 try:
-                    with Image.open(dest_master) as pil_master:
-                        showcase_img = pil_master.convert("RGBA")
-                        if (showcase_img.width, showcase_img.height) != (tw, th):
-                            showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
+                    if dest_master.suffix.lower() == ".svg":
+                        showcase_img = render_svg_to_image(dest_master, tw, th)
+                    else:
+                        with Image.open(dest_master) as pil_master:
+                            showcase_img = pil_master.convert("RGBA")
+                            if (showcase_img.width, showcase_img.height) != (tw, th):
+                                showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
                         if showcase_tmp.is_file():
                             showcase_tmp.unlink()
                         showcase_img.save(showcase_tmp, format="PNG")
@@ -3343,44 +3491,43 @@ def execute_build(
             batch_wm_secret = hashlib.sha256(DEFAULT_KEY_PATH.read_bytes()).hexdigest()
 
         # 2. Authorize single C2PA session signer for entire build
-        if not no_c2pa:
-            if is_agent_mode:
-                k_target = agent_key_name or cfg.get("ssh_key_name") or "c2pa-signer"
-                log_info(f"Initializing single C2PA session signer via SSH Agent for {len(items_to_sign_pending)} asset(s)...")
-                try:
-                    batch_signer = create_c2pa_session_signer_from_ssh_agent(
-                        key_comment=k_target,
-                        domain=manifest_domain or cfg.get("domain", DEFAULT_DOMAIN),
-                    )
-                    log_ok(f"Session signer active: single SSH authorization covers all {len(items_to_sign_pending)} release(s).")
-                except Exception as e:
-                    log_warn(f"Failed to create session signer via SSH Agent: {e}. Falling back to per-file signing.")
-            elif bw_item or cfg.get("bitwarden_item"):
-                target_bw = bw_item or cfg.get("bitwarden_item")
-                try:
-                    k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
-                    signer_info = c2pa.C2paSignerInfo(
-                        alg=c2pa.C2paSigningAlg.ES256,
-                        sign_cert=c_bytes,
-                        private_key=k_bytes,
-                        ta_url=None,
-                    )
-                    batch_signer = c2pa.Signer.from_info(signer_info)
-                except Exception as e:
-                    log_warn(f"Failed to load Bitwarden credentials: {e}")
-            elif DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file():
-                try:
-                    k_bytes = DEFAULT_KEY_PATH.read_bytes()
-                    c_bytes = DEFAULT_CERT_PATH.read_bytes()
-                    signer_info = c2pa.C2paSignerInfo(
-                        alg=c2pa.C2paSigningAlg.ES256,
-                        sign_cert=c_bytes,
-                        private_key=k_bytes,
-                        ta_url=None,
-                    )
-                    batch_signer = c2pa.Signer.from_info(signer_info)
-                except Exception as e:
-                    log_warn(f"Failed to load local signing credentials: {e}")
+        if is_agent_mode:
+            k_target = agent_key_name or cfg.get("ssh_key_name") or "c2pa-signer"
+            log_info(f"Initializing single C2PA session signer via SSH Agent for {len(items_to_sign_pending)} asset(s)...")
+            try:
+                batch_signer = create_c2pa_session_signer_from_ssh_agent(
+                    key_comment=k_target,
+                    domain=manifest_domain or cfg.get("domain", DEFAULT_DOMAIN),
+                )
+                log_ok(f"Session signer active: single SSH authorization covers all {len(items_to_sign_pending)} release(s).")
+            except Exception as e:
+                log_warn(f"Failed to create session signer via SSH Agent: {e}. Falling back to per-file signing.")
+        elif bw_item or cfg.get("bitwarden_item"):
+            target_bw = bw_item or cfg.get("bitwarden_item")
+            try:
+                k_bytes, c_bytes = fetch_bitwarden_credentials(target_bw)
+                signer_info = c2pa.C2paSignerInfo(
+                    alg=c2pa.C2paSigningAlg.ES256,
+                    sign_cert=c_bytes,
+                    private_key=k_bytes,
+                    ta_url=None,
+                )
+                batch_signer = c2pa.Signer.from_info(signer_info)
+            except Exception as e:
+                log_warn(f"Failed to load Bitwarden credentials: {e}")
+        elif DEFAULT_KEY_PATH.is_file() and DEFAULT_CERT_PATH.is_file():
+            try:
+                k_bytes = DEFAULT_KEY_PATH.read_bytes()
+                c_bytes = DEFAULT_CERT_PATH.read_bytes()
+                signer_info = c2pa.C2paSignerInfo(
+                    alg=c2pa.C2paSigningAlg.ES256,
+                    sign_cert=c_bytes,
+                    private_key=k_bytes,
+                    ta_url=None,
+                )
+                batch_signer = c2pa.Signer.from_info(signer_info)
+            except Exception as e:
+                log_warn(f"Failed to load local signing credentials: {e}")
 
     for src_file, dst_file, desc, is_tmp in items_to_sign_pending:
         if not no_sign:
