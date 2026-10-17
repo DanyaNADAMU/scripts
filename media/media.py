@@ -40,13 +40,14 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageSequence
 import pywt
 from scipy.fftpack import dct, idct
 
@@ -192,11 +193,137 @@ def parse_pad_color(val: str | None) -> tuple[int, int, int, int]:
         return (0, 0, 0, 0)
 
 
+# ------------------------------------------------------------------------------
+# Media Format Categorization & Video Utilities
+# ------------------------------------------------------------------------------
+ANIMATED_IMAGE_EXTENSIONS = {".gif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+RASTER_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".tif", ".tiff"}
+VECTOR_EXTENSIONS = {".svg"}
+MEDIA_MASTER_EXTENSIONS = (
+    ".svg", ".png", ".webp", ".jpg", ".jpeg", ".gif",
+    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"
+)
+
+
+def is_video_path(p: Path) -> bool:
+    """Checks whether path points to a supported video format."""
+    return p.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_animated_image_path(p: Path) -> bool:
+    """Checks whether path points to an animated image (GIF, animated WebP/PNG)."""
+    sfx = p.suffix.lower()
+    if sfx in ANIMATED_IMAGE_EXTENSIONS:
+        return True
+    if sfx in (".webp", ".png"):
+        try:
+            with Image.open(p) as im:
+                return getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1
+        except Exception:
+            return False
+    return False
+
+
+def get_video_dimensions(video_path: Path) -> tuple[int, int]:
+    """Extracts width and height from video file using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            str(video_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        streams = data.get("streams", [])
+        if streams:
+            stream = streams[0]
+            return int(stream.get("width", 0)), int(stream.get("height", 0))
+    except Exception as e:
+        log_warn(f"Could not read video dimensions from {video_path.name}: {e}")
+    return 0, 0
+
+
+def extract_video_frame_to_image(video_path: Path) -> Image.Image:
+    """Extracts a representative RGBA frame from video using ffmpeg."""
+    tmp_frame = tempfile.mktemp(suffix=".png")
+    try:
+        cmd = ["ffmpeg", "-y", "-ss", "00:00:00.5", "-i", str(video_path), "-vframes", "1", tmp_frame]
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode != 0 or not os.path.exists(tmp_frame):
+            cmd2 = ["ffmpeg", "-y", "-i", str(video_path), "-vframes", "1", tmp_frame]
+            subprocess.run(cmd2, capture_output=True, check=True)
+        with Image.open(tmp_frame) as im:
+            return im.convert("RGBA")
+    except Exception as e:
+        log_warn(f"Failed to extract video frame from {video_path.name}: {e}")
+        return Image.new("RGBA", (512, 512), (0, 0, 0, 255))
+    finally:
+        if os.path.exists(tmp_frame):
+            try:
+                os.unlink(tmp_frame)
+            except Exception:
+                pass
+
+
+def render_video_to_target(
+    src_path: Path,
+    dst_path: Path,
+    tw: int,
+    th: int,
+    resize_mode: str = "pad",
+    pad_color: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> None:
+    """Scales a video asset to exact target resolution using ffmpeg with specified fitting policy."""
+    tw = tw if tw % 2 == 0 else tw + 1
+    th = th if th % 2 == 0 else th + 1
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    if dst_path.is_file():
+        dst_path.unlink()
+
+    pad_hex = "black"
+    if len(pad_color) >= 3 and pad_color[3] > 0:
+        pad_hex = f"0x{pad_color[0]:02x}{pad_color[1]:02x}{pad_color[2]:02x}"
+
+    mode = (resize_mode or "pad").lower()
+    if mode in ("pad", "contain", "letterbox"):
+        vf = f"scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color={pad_hex}"
+    elif mode in ("crop", "cover"):
+        vf = f"scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th}"
+    else:
+        vf = f"scale={tw}:{th}"
+
+    out_sfx = dst_path.suffix.lower()
+    if out_sfx in (".webm", ".mkv"):
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src_path),
+            "-vf", vf,
+            "-c:v", "libvpx", "-b:v", "1M",
+            "-c:a", "libvorbis",
+            str(dst_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y", "-i", str(src_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "slow", "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(dst_path),
+        ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg video render failed for {dst_path.name}: {res.stderr}")
+
+
 def discover_sources(
     search_dir: Path,
     explicit_master: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Discovers all vector and raster source images in directory with dimensions and aspect ratios."""
+    """Discovers all vector, video, animated and raster source media in directory with dimensions and aspect ratios."""
     sources: list[dict[str, Any]] = []
     seen_paths: set[Path] = set()
 
@@ -206,13 +333,18 @@ def discover_sources(
         if f.name.startswith(".") or f.name.endswith(".ots"):
             return
         sfx = f.suffix.lower()
-        if sfx not in (".svg", ".png", ".webp", ".jpg", ".jpeg"):
+        if sfx not in MEDIA_MASTER_EXTENSIONS:
             return
 
         seen_paths.add(f.resolve())
         is_vec = sfx == ".svg"
+        is_vid = is_video_path(f)
+        is_anim = sfx == ".gif" or (sfx in (".webp", ".png") and is_animated_image_path(f))
+
         if is_vec:
             w, h = get_svg_dimensions(f)
+        elif is_vid:
+            w, h = get_video_dimensions(f)
         else:
             try:
                 with Image.open(f) as im:
@@ -226,6 +358,8 @@ def discover_sources(
             "stem": f.stem,
             "suffix": sfx,
             "is_vector": is_vec,
+            "is_video": is_vid,
+            "is_animated": is_anim,
             "width": w,
             "height": h,
             "aspect_ratio": (w / h) if (w > 0 and h > 0) else 1.0,
@@ -281,6 +415,63 @@ def select_best_source(
     return min(sources, key=score)
 
 
+def render_pil_to_canvas(
+    rgba: Image.Image,
+    tw: int,
+    th: int,
+    resize_mode: str = "pad",
+    pad_color: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Image.Image:
+    """Resizes a PIL RGBA Image to exact (tw, th) canvas according to fitting policy."""
+    mode = (resize_mode or "pad").lower()
+    tw = max(1, tw)
+    th = max(1, th)
+    sw, sh = rgba.size
+    r_src = (sw / sh) if (sw > 0 and sh > 0) else (tw / th)
+    r_target = tw / th
+
+    if abs(r_src - r_target) < 0.01:
+        return rgba.resize((tw, th), Image.Resampling.LANCZOS)
+
+    if mode in ("pad", "contain", "letterbox"):
+        if r_src > r_target:
+            rw = tw
+            rh = max(1, round(tw / r_src))
+        else:
+            rh = th
+            rw = max(1, round(th * r_src))
+        scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (tw, th), pad_color)
+        canvas.paste(scaled, ((tw - rw) // 2, (th - rh) // 2), scaled)
+        return canvas
+
+    elif mode in ("crop", "cover"):
+        if r_src > r_target:
+            rh = th
+            rw = max(tw, round(th * r_src))
+            scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+            left = (rw - tw) // 2
+            return scaled.crop((left, 0, left + tw, th))
+        else:
+            rw = tw
+            rh = max(th, round(tw / r_src))
+            scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+            top = (rh - th) // 2
+            return scaled.crop((0, top, tw, top + th))
+
+    elif mode in ("stretch", "fill"):
+        return rgba.resize((tw, th), Image.Resampling.LANCZOS)
+
+    else:  # "fit" without canvas padding
+        if r_src > r_target:
+            rw = tw
+            rh = max(1, round(tw / r_src))
+        else:
+            rh = th
+            rw = max(1, round(th * r_src))
+        return rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+
+
 def render_source_to_canvas(
     src: dict[str, Any],
     tw: int,
@@ -288,7 +479,7 @@ def render_source_to_canvas(
     resize_mode: str = "pad",
     pad_color: tuple[int, int, int, int] = (0, 0, 0, 0),
 ) -> Image.Image:
-    """Renders a vector or raster source into an exact (tw, th) PIL RGBA canvas using the specified policy."""
+    """Renders a vector, video frame, or raster source into an exact (tw, th) PIL RGBA canvas using the specified policy."""
     mode = (resize_mode or "pad").lower()
     tw = max(1, tw)
     th = max(1, th)
@@ -336,54 +527,15 @@ def render_source_to_canvas(
         else:  # "fit" without canvas padding
             return render_svg_to_image(src["path"], tw, th)
 
+    elif src.get("is_video"):
+        rgba = extract_video_frame_to_image(src["path"])
+        return render_pil_to_canvas(rgba, tw, th, resize_mode=mode, pad_color=pad_color)
+
     else:
-        # Raster source
+        # Raster source or animated image (extract first frame)
         with Image.open(src["path"]) as im:
             rgba = im.convert("RGBA")
-        sw, sh = rgba.size
-        r_src = (sw / sh) if (sw > 0 and sh > 0) else (tw / th)
-        r_target = tw / th
-
-        if abs(r_src - r_target) < 0.01:
-            return rgba.resize((tw, th), Image.Resampling.LANCZOS)
-
-        if mode in ("pad", "contain", "letterbox"):
-            if r_src > r_target:
-                rw = tw
-                rh = max(1, round(tw / r_src))
-            else:
-                rh = th
-                rw = max(1, round(th * r_src))
-            scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGBA", (tw, th), pad_color)
-            canvas.paste(scaled, ((tw - rw) // 2, (th - rh) // 2), scaled)
-            return canvas
-
-        elif mode in ("crop", "cover"):
-            if r_src > r_target:
-                rh = th
-                rw = max(tw, round(th * r_src))
-                scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
-                left = (rw - tw) // 2
-                return scaled.crop((left, 0, left + tw, th))
-            else:
-                rw = tw
-                rh = max(th, round(tw / r_src))
-                scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
-                top = (rh - th) // 2
-                return scaled.crop((0, top, tw, top + th))
-
-        elif mode in ("stretch", "fill"):
-            return rgba.resize((tw, th), Image.Resampling.LANCZOS)
-
-        else:  # "fit" without canvas padding
-            if r_src > r_target:
-                rw = tw
-                rh = max(1, round(tw / r_src))
-            else:
-                rh = th
-                rw = max(1, round(th * r_src))
-            return rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+        return render_pil_to_canvas(rgba, tw, th, resize_mode=mode, pad_color=pad_color)
 
 
 
@@ -2018,38 +2170,92 @@ def process_signing(
 
     # Stage 1: Embed DWT-DCT Steganographic Watermark
     is_svg = input_path.suffix.lower() == ".svg"
-    if not no_watermark and not is_svg:
+    is_vid = is_video_path(input_path)
+    is_anim = is_animated_image_path(input_path)
+
+    if not no_watermark and not is_svg and not is_vid:
         try:
             with Image.open(input_path) as pil_img:
-                log_info(f"Stage 1: Embedding invisible DWT-DCT watermark ('{wm_text}')...")
-                wm_img = embed_dwt_watermark(
-                    pil_img,
-                    text=wm_text,
-                    secret=wm_secret,
-                    delta=wm_delta,
-                    repeats=wm_repeats,
-                )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                save_fmt = pil_img.format or "PNG"
-                save_kwargs: dict[str, Any] = {}
-                if output_path.suffix.lower() in (".jpg", ".jpeg"):
-                    save_fmt = "JPEG"
-                    save_kwargs = {"quality": 95}
-                    if wm_img.mode in ("RGBA", "LA", "P"):
-                        wm_img = wm_img.convert("RGB")
-                if output_path.is_file():
-                    output_path.unlink()
-                wm_img.save(output_path, format=save_fmt, **save_kwargs)
-                log_ok("Stage 1 complete: Watermark embedded into frequency spectrum.")
+                if is_anim:
+                    log_info(f"Stage 1: Embedding invisible DWT-DCT watermark across animation frames ('{wm_text}')...")
+                    out_frames = []
+                    durations = []
+                    disposals = []
+                    loop = pil_img.info.get("loop", 0)
+                    is_out_gif = output_path.suffix.lower() == ".gif"
+                    is_out_webp = output_path.suffix.lower() == ".webp"
+
+                    for frame in ImageSequence.Iterator(pil_img):
+                        durations.append(frame.info.get("duration", 100))
+                        disposals.append(frame.info.get("disposal", 2))
+                        rgba_frame = frame.convert("RGBA")
+                        wm_frame = embed_dwt_watermark(
+                            rgba_frame,
+                            text=wm_text,
+                            secret=wm_secret,
+                            delta=wm_delta,
+                            repeats=wm_repeats,
+                        )
+                        if is_out_gif:
+                            has_alpha = wm_frame.getchannel("A").getextrema() != (255, 255)
+                            if has_alpha:
+                                pal_frame = wm_frame.quantize(colors=255, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+                            else:
+                                pal_frame = wm_frame.convert("RGB").quantize(colors=256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+                            out_frames.append(pal_frame)
+                        else:
+                            out_frames.append(wm_frame)
+
+                    if output_path.is_file():
+                        output_path.unlink()
+
+                    save_fmt = "GIF" if is_out_gif else ("WEBP" if is_out_webp else (pil_img.format or "GIF"))
+                    save_kwargs: dict[str, Any] = {
+                        "save_all": True,
+                        "append_images": out_frames[1:],
+                        "duration": durations,
+                        "loop": loop,
+                    }
+                    if is_out_gif:
+                        save_kwargs["disposal"] = disposals
+                    elif is_out_webp:
+                        save_kwargs["quality"] = 95
+
+                    out_frames[0].save(output_path, format=save_fmt, **save_kwargs)
+                    log_ok(f"Stage 1 complete: Watermark embedded across all {len(out_frames)} animation frames.")
+                else:
+                    log_info(f"Stage 1: Embedding invisible DWT-DCT watermark ('{wm_text}')...")
+                    wm_img = embed_dwt_watermark(
+                        pil_img,
+                        text=wm_text,
+                        secret=wm_secret,
+                        delta=wm_delta,
+                        repeats=wm_repeats,
+                    )
+                    save_fmt = pil_img.format or "PNG"
+                    save_kwargs = {}
+                    if output_path.suffix.lower() in (".jpg", ".jpeg"):
+                        save_fmt = "JPEG"
+                        save_kwargs = {"quality": 95}
+                        if wm_img.mode in ("RGBA", "LA", "P"):
+                            wm_img = wm_img.convert("RGB")
+                    if output_path.is_file():
+                        output_path.unlink()
+                    wm_img.save(output_path, format=save_fmt, **save_kwargs)
+                    log_ok("Stage 1 complete: Watermark embedded into frequency spectrum.")
         except Exception as e:
             log_err(f"Steganographic watermarking failed: {e}")
             sys.exit(1)
     else:
-        if is_svg and not no_watermark:
+        if is_vid:
+            log_info("Stage 1: Steganography skipped (not applicable to compressed video stream; secured via C2PA + OpenTimestamps).")
+        elif is_svg and not no_watermark:
             log_info("Stage 1: Steganography skipped (not applicable to vector XML format).")
         else:
             log_info("Stage 1: Invisible watermarking disabled (--no-watermark).")
         if input_path.resolve() != output_path.resolve():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             if output_path.is_file():
                 output_path.unlink()
             shutil.copyfile(input_path, output_path)
@@ -2095,8 +2301,14 @@ def process_signing(
             temp_dest.replace(output_path)
             log_ok("Stage 2 complete: C2PA cryptographic manifest embedded.")
         except Exception as e:
-            log_err(f"C2PA signing error: {e}")
-            sys.exit(1)
+            if is_vid and ("unsupported" in str(e).lower() or "notsupported" in str(e).lower()):
+                log_warn(f"Stage 2: C2PA manifest embedding not supported for video container '{output_path.suffix}'; secured via Bitcoin blockchain timestamp.")
+                temp_dest = output_path.with_suffix(f".tmp{output_path.suffix}")
+                if temp_dest.is_file():
+                    temp_dest.unlink()
+            else:
+                log_err(f"C2PA signing error: {e}")
+                sys.exit(1)
     else:
         if no_c2pa:
             log_info("Stage 2: C2PA manifest signing disabled (--no-c2pa).")
@@ -2111,12 +2323,25 @@ def process_signing(
     log_ok(f"Ready: {output_path} ({output_path.stat().st_size:,} bytes)\n")
 
 
-def echo_summary(has_c2pa: bool, has_wm: bool, ots_status: str | None = None, is_vector: bool = False) -> None:
+def echo_summary(
+    has_c2pa: bool,
+    has_wm: bool,
+    ots_status: str | None = None,
+    is_vector: bool = False,
+    is_video: bool = False,
+    is_anim: bool = False,
+) -> None:
     print(f"\n  {C_BOLD}Summary Verdict:{C_RESET}")
     ots_valid = (ots_status in ("confirmed", "pending"))
 
-    if is_vector and has_c2pa and ots_valid:
+    if is_video and has_c2pa and ots_valid:
+        print(f"    {C_GREEN}★ Dual-Layer Video Attestation Verified (C2PA Content Credentials + OpenTimestamps; Steganography N/A for Video).{C_RESET}\n")
+    elif is_video and ots_valid:
+        print(f"    {C_BLUE}✓ Blockchain Video Timestamp Verified (OpenTimestamps Bitcoin proof).{C_RESET}\n")
+    elif is_vector and has_c2pa and ots_valid:
         print(f"    {C_GREEN}★ Dual-Layer Vector Attestation Verified (C2PA + OpenTimestamps; Steganography N/A for SVG).{C_RESET}\n")
+    elif is_anim and has_c2pa and has_wm and ots_valid:
+        print(f"    {C_GREEN}★ Full Triple-Layer Animation Attestation Verified (C2PA + Per-Frame Steganography + OpenTimestamps).{C_RESET}\n")
     elif has_c2pa and has_wm and ots_valid:
         print(f"    {C_GREEN}★ Full Triple-Layer Attestation Verified (C2PA + Steganography + OpenTimestamps).{C_RESET}\n")
     elif has_c2pa and has_wm:
@@ -2153,6 +2378,8 @@ def inspect_image(
         log_head(f"Media Verification: {image_path.name}")
 
     is_svg = (image_path.suffix.lower() == ".svg")
+    is_vid = is_video_path(image_path)
+    is_anim = is_animated_image_path(image_path)
 
     # 1. Verify C2PA Manifest (Stage 1)
     c2pa_data: dict[str, Any] | None = None
@@ -2187,16 +2414,28 @@ def inspect_image(
             except Exception:
                 pass
     if not wm_secret:
+        if DEFAULT_KEY_PATH.is_file():
+            try:
+                wm_secret = hashlib.sha256(DEFAULT_KEY_PATH.read_bytes()).hexdigest()
+            except Exception:
+                pass
+    if not wm_secret:
         wm_secret = get_default_secret()
     wm_repeats = int(cfg.get("watermark_repeats", 3))
     detected_wm: str | None = None
 
-    if is_svg:
+    if is_svg or is_vid:
         detected_wm = None
     else:
         try:
             with Image.open(image_path) as pil_img:
-                detected_wm = extract_dwt_watermark(pil_img, secret=wm_secret, repeats=wm_repeats)
+                if getattr(pil_img, "is_animated", False) and getattr(pil_img, "n_frames", 1) > 1:
+                    for f in ImageSequence.Iterator(pil_img):
+                        detected_wm = extract_dwt_watermark(f, secret=wm_secret, repeats=wm_repeats)
+                        if detected_wm:
+                            break
+                else:
+                    detected_wm = extract_dwt_watermark(pil_img, secret=wm_secret, repeats=wm_repeats)
         except Exception as e:
             log_warn(f"Watermark scan error: {e}")
 
@@ -2204,9 +2443,10 @@ def inspect_image(
     ots_data = inspect_ots_proof(image_path, ots_path=ots_path)
 
     if as_json:
+        fmt_str = "video" if is_vid else ("svg" if is_svg else ("animated" if is_anim else "raster"))
         result = {
             "file": str(image_path),
-            "format": "svg" if is_svg else "raster",
+            "format": fmt_str,
             "c2pa": c2pa_data,
             "c2pa_validation": c2pa_val_str,
             "invisible_watermark": detected_wm,
@@ -2245,10 +2485,13 @@ def inspect_image(
         print(f"    {C_YELLOW}⚠ No embedded C2PA Content Credentials manifest found.{C_RESET}")
 
     print(f"\n  {C_BOLD}--- LEVEL 2: DWT-DCT Steganographic Watermark ---{C_RESET}")
-    if is_svg:
+    if is_vid:
+        print(f"    {C_BLUE}ℹ N/A (Video stream; pixel-domain steganography not applicable){C_RESET}")
+    elif is_svg:
         print(f"    {C_BLUE}ℹ N/A (Vector XML asset; pixel-domain steganography not applicable){C_RESET}")
     elif detected_wm:
-        print(f"    {C_GREEN}✓ Watermark Decoded:{C_RESET} \"{C_BOLD}{detected_wm}{C_RESET}\"")
+        anim_note = " (Detected across animation frames)" if is_anim else ""
+        print(f"    {C_GREEN}✓ Watermark Decoded:{C_RESET} \"{C_BOLD}{detected_wm}{C_RESET}\"{anim_note}")
         print(f"      Robustness: Frequency domain resilient against crop, resize, and re-compression.")
     else:
         print(f"    {C_YELLOW}⚠ No valid steganographic watermark found matching secret key.{C_RESET}")
@@ -2283,6 +2526,8 @@ def inspect_image(
         has_wm=bool(detected_wm),
         ots_status=ots_data.get("status") if ots_data else None,
         is_vector=is_svg,
+        is_video=is_vid,
+        is_anim=is_anim,
     )
 
 
@@ -2591,7 +2836,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         f'  "generate_favicon": {gen_favicon_str},',
         "",
         '  // Distribution Formats (rendered into generated/):',
-        '  // Supported: ["webp", "png", "svg"] ("svg" is exported when master is vector SVG)',
+        '  // Supported: ["webp", "png", "svg", "gif", "mp4", "webm"] ("svg" for vector, "mp4"/"webm" for video)',
         f'  "formats": [{formats_str}],',
         "",
         '  // Distribution Resolutions (rendered into generated/):',
@@ -2667,6 +2912,8 @@ def load_or_resolve_manifest(
     if master_path and master_path.is_file():
         if master_path.suffix.lower() == ".svg":
             master_w, master_h = get_svg_dimensions(master_path)
+        elif is_video_path(master_path):
+            master_w, master_h = get_video_dimensions(master_path)
         else:
             try:
                 with Image.open(master_path) as img:
@@ -2678,8 +2925,16 @@ def load_or_resolve_manifest(
     if not manifest:
         if master_w > 0 and master_h > 0:
             manifest = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
-            if master_path and master_path.suffix.lower() == ".svg" and "svg" not in manifest["formats"]:
-                manifest["formats"].append("svg")
+            if master_path:
+                msfx = master_path.suffix.lower()
+                if msfx == ".svg" and "svg" not in manifest["formats"]:
+                    manifest["formats"].append("svg")
+                elif msfx == ".gif" and "gif" not in manifest["formats"]:
+                    manifest["formats"].insert(0, "gif")
+                elif is_video_path(master_path):
+                    v_fmt = msfx.lstrip(".")
+                    if v_fmt not in manifest["formats"]:
+                        manifest["formats"].insert(0, v_fmt)
             save_path = target_dir / "manifest.json"
             try:
                 save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2727,9 +2982,16 @@ def load_or_resolve_manifest(
                 manifest["resize_mode"] = auto_m.get("resize_mode", "pad")
             if "pad_color" not in manifest:
                 manifest["pad_color"] = auto_m.get("pad_color", "transparent")
-            if master_path and master_path.suffix.lower() == ".svg":
-                if "svg" not in manifest.get("formats", []):
+            if master_path:
+                msfx = master_path.suffix.lower()
+                if msfx == ".svg" and "svg" not in manifest.get("formats", []):
                     manifest.setdefault("formats", []).append("svg")
+                elif msfx == ".gif" and "gif" not in manifest.get("formats", []):
+                    manifest.setdefault("formats", []).insert(0, "gif")
+                elif is_video_path(master_path):
+                    v_fmt = msfx.lstrip(".")
+                    if v_fmt not in manifest.get("formats", []):
+                        manifest.setdefault("formats", []).insert(0, v_fmt)
             if auto_m["aspect_ratio"] != "1:1" and (not manifest.get("targets") or manifest.get("targets") == [
                 {"width": 512, "height": 512, "label": "512"},
                 {"width": 256, "height": 256, "label": "256"},
@@ -3552,7 +3814,7 @@ def execute_build(
                 f"Rendered multi-resolution favicon.ico (16..256) from {fav_source['name']} (mode: {fav_mode})"
             )
 
-        # Render raster targets directly using best matching source
+        # Render targets directly using best matching source
         for t in targets:
             tw, th = t["width"], t["height"]
             lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
@@ -3561,22 +3823,118 @@ def execute_build(
             t_src_name = t.get("source")
 
             best_src = select_best_source(sources, tw, th, explicit_name=t_src_name)
-            res_img = render_source_to_canvas(best_src, tw, th, resize_mode=t_mode, pad_color=t_pad)
 
-            if "webp" in formats:
-                out_webp = gen_dir / f"{name}_{lbl}.webp"
-                if out_webp.is_file():
-                    out_webp.unlink()
-                res_img.save(out_webp, format="WEBP", quality=90, method=6)
-                out_webp.chmod(0o444)
+            if best_src.get("is_video"):
+                # Video source: render scaled video formats via ffmpeg
+                if "mp4" in formats:
+                    out_mp4 = gen_dir / f"{name}_{lbl}.mp4"
+                    render_video_to_target(best_src["path"], out_mp4, tw, th, resize_mode=t_mode, pad_color=t_pad)
+                    out_mp4.chmod(0o444)
+                    generated_count += 1
+                if "webm" in formats:
+                    out_webm = gen_dir / f"{name}_{lbl}.webm"
+                    render_video_to_target(best_src["path"], out_webm, tw, th, resize_mode=t_mode, pad_color=t_pad)
+                    out_webm.chmod(0o444)
+                    generated_count += 1
+                # Also generate raster poster/previews if requested
+                if "webp" in formats:
+                    res_img = render_source_to_canvas(best_src, tw, th, resize_mode=t_mode, pad_color=t_pad)
+                    out_webp = gen_dir / f"{name}_{lbl}.webp"
+                    if out_webp.is_file():
+                        out_webp.unlink()
+                    res_img.save(out_webp, format="WEBP", quality=90, method=6)
+                    out_webp.chmod(0o444)
+                    generated_count += 1
+                if "png" in formats:
+                    res_img = render_source_to_canvas(best_src, tw, th, resize_mode=t_mode, pad_color=t_pad)
+                    out_png = gen_dir / f"{name}_{lbl}.png"
+                    if out_png.is_file():
+                        out_png.unlink()
+                    res_img.save(out_png, format="PNG", optimize=True)
+                    out_png.chmod(0o444)
+                    generated_count += 1
+
+            elif best_src.get("is_animated"):
+                # Animated source (GIF or animated WebP): render all frames
+                with Image.open(best_src["path"]) as anim_im:
+                    durations = []
+                    disposals = []
+                    loop = anim_im.info.get("loop", 0)
+                    canvas_frames = []
+                    for f in ImageSequence.Iterator(anim_im):
+                        durations.append(f.info.get("duration", 100))
+                        disposals.append(f.info.get("disposal", 2))
+                        canvas_frames.append(render_pil_to_canvas(f.convert("RGBA"), tw, th, resize_mode=t_mode, pad_color=t_pad))
+
+                if "gif" in formats or best_src["suffix"] == ".gif":
+                    out_gif = gen_dir / f"{name}_{lbl}.gif"
+                    if out_gif.is_file():
+                        out_gif.unlink()
+                    pal_frames = []
+                    for cf in canvas_frames:
+                        has_alpha = cf.getchannel("A").getextrema() != (255, 255)
+                        if has_alpha:
+                            pal = cf.quantize(colors=255, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+                        else:
+                            pal = cf.convert("RGB").quantize(colors=256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+                        pal_frames.append(pal)
+                    pal_frames[0].save(out_gif, format="GIF", save_all=True, append_images=pal_frames[1:], duration=durations, loop=loop, disposal=disposals)
+                    out_gif.chmod(0o444)
+                    generated_count += 1
+
+                if "webp" in formats:
+                    out_webp = gen_dir / f"{name}_{lbl}.webp"
+                    if out_webp.is_file():
+                        out_webp.unlink()
+                    canvas_frames[0].save(out_webp, format="WEBP", save_all=True, append_images=canvas_frames[1:], duration=durations, loop=loop, quality=90)
+                    out_webp.chmod(0o444)
+                    generated_count += 1
+
+                if "png" in formats:
+                    out_png = gen_dir / f"{name}_{lbl}.png"
+                    if out_png.is_file():
+                        out_png.unlink()
+                    canvas_frames[0].save(out_png, format="PNG", optimize=True)
+                    out_png.chmod(0o444)
+                    generated_count += 1
+
+            else:
+                # Still raster or vector source
+                res_img = render_source_to_canvas(best_src, tw, th, resize_mode=t_mode, pad_color=t_pad)
+                if "webp" in formats:
+                    out_webp = gen_dir / f"{name}_{lbl}.webp"
+                    if out_webp.is_file():
+                        out_webp.unlink()
+                    res_img.save(out_webp, format="WEBP", quality=90, method=6)
+                    out_webp.chmod(0o444)
+                    generated_count += 1
+                if "png" in formats:
+                    out_png = gen_dir / f"{name}_{lbl}.png"
+                    if out_png.is_file():
+                        out_png.unlink()
+                    res_img.save(out_png, format="PNG", optimize=True)
+                    out_png.chmod(0o444)
+                    generated_count += 1
+                if "gif" in formats:
+                    out_gif = gen_dir / f"{name}_{lbl}.gif"
+                    if out_gif.is_file():
+                        out_gif.unlink()
+                    res_img.save(out_gif, format="GIF")
+                    out_gif.chmod(0o444)
+                    generated_count += 1
+
+        # Export distribution video assets if master is video
+        video_sources = [s for s in sources if s.get("is_video")]
+        for v_src in video_sources:
+            if v_src["suffix"].lstrip(".") in formats:
+                out_v = gen_dir / f"{name}{v_src['suffix']}"
+                if out_v.resolve() != v_src["path"].resolve():
+                    if out_v.is_file():
+                        out_v.unlink()
+                    shutil.copyfile(v_src["path"], out_v)
+                out_v.chmod(0o444)
                 generated_count += 1
-            if "png" in formats:
-                out_png = gen_dir / f"{name}_{lbl}.png"
-                if out_png.is_file():
-                    out_png.unlink()
-                res_img.save(out_png, format="PNG", optimize=True)
-                out_png.chmod(0o444)
-                generated_count += 1
+                log_ok(f"Exported distribution video asset: {out_v.name}")
 
         # Export distribution vector assets
         vector_sources = [s for s in sources if s["is_vector"]]
@@ -3643,7 +4001,7 @@ def execute_build(
                 f.is_file()
                 and not f.name.startswith(".")
                 and not f.name.endswith(".ots")
-                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")
+                and f.suffix.lower() in MEDIA_MASTER_EXTENSIONS
                 and f.resolve() != dest_master.resolve()
             ):
                 items_to_sign.append((f, signed_dir / f.name, f"Generator master ({f.name})"))
@@ -3655,7 +4013,7 @@ def execute_build(
                 f.is_file()
                 and not f.name.startswith(".")
                 and not f.name.endswith(".ots")
-                and f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")
+                and f.suffix.lower() in MEDIA_MASTER_EXTENSIONS
             ):
                 target_dst = signed_dir / f.name
                 if any(dst == target_dst for _, dst, _ in items_to_sign):
@@ -4322,8 +4680,8 @@ Automation & Keys Examples:
     p_up.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
 
     # Command: sign
-    p_sign = subparsers.add_parser("sign", help="Sign an individual image with C2PA and invisible watermark")
-    p_sign.add_argument("input", type=Path, help="Input media file (PNG, JPG, WebP, etc.)")
+    p_sign = subparsers.add_parser("sign", help="Sign an individual media file (image, animation, or video)")
+    p_sign.add_argument("input", type=Path, help="Input media file (PNG, JPG, WebP, GIF, MP4, MOV, SVG, etc.)")
     p_sign.add_argument("-o", "--output", type=Path, help="Output path (default: <name>_signed.<ext>)")
     p_sign.add_argument("--in-place", action="store_true", help="Overwrite input file directly")
     p_sign.add_argument("-t", "--title", type=str, help="Media title")
@@ -4344,7 +4702,7 @@ Automation & Keys Examples:
 
     # Command: verify
     p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA, watermarks & OpenTimestamps")
-    p_verify.add_argument("file", type=Path, help="Target media file to inspect")
+    p_verify.add_argument("file", type=Path, help="Target media file to inspect (image, animation, or video)")
     p_verify.add_argument("--ots", type=Path, help="Path to custom or detached .ots proof file")
     p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
     p_verify.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Derive watermark secret via SSH Agent (Bitwarden)")

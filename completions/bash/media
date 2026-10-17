@@ -22,7 +22,7 @@ _media_completions() {
 
     case "$prev" in
         -m|--master|-r|--raw)
-            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|xcf|psd|ai|tiff)" -- "$cur") )
+            COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|gif|mp4|mov|webm|m4v|avi|mkv|xcf|psd|kra|ai|blend|tiff)" -- "$cur") )
             return 0
             ;;
         -d|--dir|-p|--proofs-dir|--out-dir)
@@ -91,7 +91,7 @@ _media_completions() {
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
             else
-                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
+                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|gif|mp4|mov|webm|m4v|avi|mkv|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
             fi
             return 0
             ;;
@@ -100,7 +100,7 @@ _media_completions() {
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
             else
-                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
+                COMPREPLY=( $(compgen -f -X "!*.@(png|jpg|jpeg|webp|avif|svg|gif|mp4|mov|webm|m4v|avi|mkv|tiff|bmp)" -- "$cur") $(compgen -W "$opts" -- "$cur") )
             fi
             return 0
             ;;

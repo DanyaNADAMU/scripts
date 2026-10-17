@@ -7,8 +7,12 @@ Unified cryptographic media processing, C2PA attestation, invisible watermarking
 `media` replaces and unifies separate signing and asset building tools into a single, cohesive command-line utility.
 
 ### Core Capabilities:
-* **Triple-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark (DWT-DCT) + OpenTimestamps proof.
-* **Asset Pipeline:** Multi-tier design asset compiler (`raw` + `to_sign/to_generate` -> `generated` + `signed`), aspect-ratio auto-detection (1:1, 16:9, 4:3, etc.), customizable `manifest.json`, multi-scale WebP/PNG rendering, and multi-layer `favicon.ico`.
+* **Triple-Layer Attestation:** C2PA Level 1 provenance manifest + invisible frequency-domain watermark (DWT-DCT) + OpenTimestamps Bitcoin proof.
+* **Format Versatility:**
+  * **Still Images:** PNG, WebP, JPG/JPEG, AVIF, SVG, TIFF (Triple-layer).
+  * **Animated Images:** GIF, animated WebP/PNG with multi-frame DWT-DCT steganography preserving durations, loop counts, and transparency (Triple-layer).
+  * **Video Formats:** MP4, MOV, WebM, M4V, AVI, MKV with C2PA Content Credentials and Bitcoin timestamping (Dual-layer, steganography skipped).
+* **Asset Pipeline:** Multi-tier design asset compiler (`raw` + `to_sign/to_generate` -> `generated` + `signed`), aspect-ratio auto-detection (1:1, 16:9, 4:3, etc.), customizable `manifest.json`, multi-scale WebP/PNG/GIF/video rendering, poster frame extraction, and multi-layer `favicon.ico`.
 * **Zero-Disk Bitwarden Integration:** Load private keys and certificate chains directly from Bitwarden into RAM (`--bw`) or Bitwarden Desktop SSH Agent (`--agent`) with 0 secret bytes written to disk.
 * **Segregated Proofs Architecture:** Automatically isolates `.ots` files into a dedicated library (`Icons-Proofs` / `SEAFILE_PROOFS`), allowing remote servers to sync and upgrade proofs with 100% zero-media exposure.
 * **Non-Blocking Audit:** Diagnostic pass (`media audit`) reporting all SHA-256 mismatches, missing proofs, and orphaned files in a unified report.
@@ -88,8 +92,16 @@ media upgrade
 # Sign an individual image (C2PA + Watermark + OpenTimestamps)
 media sign --bw --stamp hero.png
 
+# Sign an animated GIF with multi-frame watermarking & C2PA
+media sign --bw --stamp animation.gif
+
+# Sign a video file (MP4/MOV C2PA credentials + Bitcoin OpenTimestamps)
+media sign --bw --stamp clip.mp4
+
 # Verify provenance, watermark, and Bitcoin confirmation status
 media verify hero_signed.png
+media verify animation_signed.gif
+media verify clip_signed.mp4
 
 # Anchor any arbitrary file in Bitcoin blockchain
 media stamp contract.pdf

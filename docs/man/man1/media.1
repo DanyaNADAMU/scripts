@@ -95,7 +95,7 @@ It integrates three independent cryptographic layers into a unified workflow:
 Initializes the standardized directory hierarchy (\fBsource/raw/\fR, \fBsource/master/\fR, \fBsigned/\fR, \fBdist/\fR, and the corresponding proofs directory) and generates a default \fBmanifest.json\fR for a new asset version tag without building files.
 .TP
 .B build \fIname\fR \fIversion\fR
-Constructs a complete versioned release from source materials in \fBto_sign/to_generate/\fR. Automatically discovers all source canvases (SVG, PNG, WebP), intelligently matches optimal source images to targets based on aspect ratio and vector format, and applies fitting policies (\fBpad\fR with alpha letterboxing, \fBcrop\fR, \fBstretch\fR, or \fBfit\fR). Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, SVG), multi-layer \fBfavicon.ico\fR, and updates the atomic \fBlatest\fR symlink.
+Constructs a complete versioned release from source materials in \fBto_sign/to_generate/\fR. Automatically discovers all source canvases (SVG, PNG, WebP, GIF, MP4, MOV, WebM), intelligently matches optimal source images or video streams to targets based on aspect ratio and format, and applies fitting policies (\fBpad\fR with alpha letterboxing, \fBcrop\fR, \fBstretch\fR, or \fBfit\fR). Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, SVG, GIF, MP4/WebM video scaling with poster extraction), multi-layer \fBfavicon.ico\fR, and updates the atomic \fBlatest\fR symlink.
 .TP
 .B audit [\fIname\fR] [\fIversion\fR]
 Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
@@ -110,10 +110,10 @@ Can target an individual file, directory, specific asset version (\fBmedia upgra
 .SS File Attestation
 .TP
 .B sign \fIinput\fR
-Signs an arbitrary image (PNG, JPG, WebP, AVIF, SVG, TIFF) with C2PA Content Credentials and embeds an invisible frequency-domain watermark. With \fB\-\-stamp\fR, also anchors the file in the Bitcoin blockchain.
+Signs an arbitrary media file (raster images, animated GIFs, or videos such as MP4/MOV). For still and animated images, embeds C2PA Content Credentials and an invisible frequency-domain watermark (DWT-DCT per frame for GIF). For video formats, embeds C2PA credentials without steganography. With \fB\-\-stamp\fR, also anchors the file in the Bitcoin blockchain.
 .TP
 .B verify \fIfile\fR
-Inspects and verifies all three attestation layers of a media file: C2PA manifest validity, DWT-DCT invisible watermark extraction, and OpenTimestamps Bitcoin blockchain confirmation status.
+Inspects and verifies attestation layers of a media file: C2PA manifest validity, DWT-DCT invisible watermark extraction (across animated frames if applicable), and OpenTimestamps Bitcoin blockchain confirmation status. For video files, reports dual-layer status (C2PA + OTS).
 .TP
 .B stamp \fIfile\fR
 Anchors any file in the Bitcoin blockchain via OpenTimestamps, producing a detached \fI.ots\fR proof file.
@@ -146,7 +146,7 @@ Configures the default signing source. Pass \fBagent\fR or \fBssh\-agent\fR to u
 .SH OPTIONS
 .TP
 .BI \-m ", " \-\-master " file"
-Path to normalized master image (PNG, WebP). Auto-detected if present in \fBsource/master/\fR.
+Path to normalized master media file (PNG, WebP, GIF, MP4, MOV, WebM). Auto-detected if present in \fBto_sign/to_generate/\fR.
 .TP
 .BI \-r ", " \-\-raw " file"
 Path to original project canvas (\fI.xcf\fR, \fI.psd\fR, \fI.svg\fR). Auto-detected if present in \fBsource/raw/\fR.
