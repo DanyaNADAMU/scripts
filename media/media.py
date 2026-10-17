@@ -2167,7 +2167,160 @@ def detect_aspect_ratio_and_targets(
         "generate_favicon": generate_favicon,
         "formats": ["webp", "png"],
         "targets": filtered_targets,
+        "signed": {
+            "enabled": False,
+            "sizes": [],
+        },
+        "metadata": {
+            "author": "",
+            "domain": "",
+            "license": "",
+            "description": "",
+        },
+        "watermark": {
+            "text": "",
+        },
     }
+
+
+def strip_json_comments(text: str) -> str:
+    """Removes single-line (//) and multi-line (/* */) comments from JSON text while preserving strings."""
+    pattern = re.compile(
+        r'("(?:\\.|[^"\\])*")|//.*?$|/\*.*?\*/',
+        re.MULTILINE | re.DOTALL,
+    )
+
+    def replacer(match: re.Match) -> str:
+        if match.group(1):
+            return match.group(1)
+        return ""
+
+    return pattern.sub(replacer, text)
+
+
+def render_manifest_json(manifest: dict[str, Any]) -> str:
+    """Formats manifest dictionary into human-friendly, self-documenting JSONC with inline guides."""
+    name = manifest.get("name", "asset")
+    version = manifest.get("version", "v1")
+    aspect_ratio = manifest.get("aspect_ratio", "auto")
+    master_dim = manifest.get("master_dimensions", "")
+    gen_favicon = bool(manifest.get("generate_favicon", True))
+    formats = manifest.get("formats", ["webp", "png"])
+    targets = manifest.get("targets", [])
+    signed = manifest.get("signed", {})
+    if isinstance(signed, bool):
+        signed = {"enabled": signed, "sizes": []}
+    elif not isinstance(signed, dict):
+        signed = {"enabled": True, "sizes": [signed]}
+
+    signed_enabled = bool(signed.get("enabled", False))
+    signed_sizes = signed.get("sizes", [])
+
+    meta = manifest.get("metadata", {})
+    meta_author = meta.get("author", "")
+    meta_domain = meta.get("domain", "")
+    meta_license = meta.get("license", "")
+    meta_description = meta.get("description", "")
+
+    wm = manifest.get("watermark", {})
+    wm_text = wm.get("text", "")
+
+    target_lines = []
+    for t in targets:
+        if isinstance(t, dict):
+            w = t.get("width")
+            h = t.get("height")
+            lbl = t.get("label", str(w) if w == h else f"{w}x{h}")
+            target_lines.append(f'    {{ "width": {w}, "height": {h}, "label": "{lbl}" }}')
+        elif isinstance(t, int):
+            target_lines.append(f'    {t}')
+        else:
+            target_lines.append(f'    {json.dumps(t)}')
+    targets_str = ",\n".join(target_lines)
+
+    formats_str = ", ".join(f'"{f}"' for f in formats)
+
+    signed_size_parts = []
+    for s in signed_sizes:
+        if isinstance(s, dict):
+            w = s.get("width")
+            h = s.get("height")
+            lbl = s.get("label", str(w) if w == h else f"{w}x{h}")
+            signed_size_parts.append(f'{{ "width": {w}, "height": {h}, "label": "{lbl}" }}')
+        else:
+            signed_size_parts.append(json.dumps(s))
+    signed_sizes_str = ", ".join(signed_size_parts)
+
+    gen_favicon_str = "true" if gen_favicon else "false"
+    signed_enabled_str = "true" if signed_enabled else "false"
+
+    lines = [
+        "{",
+        "  // --------------------------------------------------------------------------",
+        f"  // Media Asset Pipeline Manifest: {name} ({version})",
+        "  // Documentation: man media(1) | media --help",
+        "  // --------------------------------------------------------------------------",
+        f'  "name": "{name}",',
+        f'  "version": "{version}",',
+        "",
+        '  // Aspect Ratio & Master Dimensions:',
+        '  // Options: "auto" (detected on build), "1:1", "16:9", "16:10", "4:3", "21:9", "9:16", "3:4", or "WxH"',
+        f'  "aspect_ratio": "{aspect_ratio}",',
+    ]
+
+    if master_dim:
+        lines.append(f'  "master_dimensions": "{master_dim}",')
+
+    lines.extend([
+        "",
+        '  // Favicon Generation:',
+        '  // When true, generates multi-resolution generated/favicon.ico (16, 32, 48, 64, 128, 256 layers)',
+        f'  "generate_favicon": {gen_favicon_str},',
+        "",
+        '  // Distribution Formats (rendered into generated/):',
+        '  // Supported: ["webp", "png"]',
+        f'  "formats": [{formats_str}],',
+        "",
+        '  // Distribution Resolutions (rendered into generated/):',
+        '  // Supports objects {"width": 512, "height": 512, "label": "512"}, numbers [512, 256], or strings ["1920x1080"]',
+    ])
+
+    if target_lines:
+        lines.append('  "targets": [')
+        lines.append(",\n".join(target_lines))
+        lines.append('  ],')
+    else:
+        lines.append('  "targets": [],')
+
+    lines.extend([
+        "",
+        '  // Additional Scaled Releases (C2PA + DWT + OTS signatures in signed/):',
+        '  // When enabled, renders master into specified sizes and applies all cryptographic signatures.',
+        '  // Note: Master image and any extra files in to_sign/ are always signed into signed/.',
+        '  // Leave sizes empty [] if only master clone and extra to_sign/ files should be signed.',
+        '  "signed": {',
+        f'    "enabled": {signed_enabled_str},',
+        f'    "sizes": [{signed_sizes_str}]',
+        '  },',
+        "",
+        '  // Optional C2PA Content Credentials metadata overrides:',
+        '  // Leave empty strings "" to use global defaults from ~/.config/nadamu/c2pa.json',
+        '  "metadata": {',
+        f'    "author": "{meta_author}",',
+        f'    "domain": "{meta_domain}",',
+        f'    "license": "{meta_license}",',
+        f'    "description": "{meta_description}"',
+        '  },',
+        "",
+        '  // Optional Invisible DWT-DCT Steganography overrides:',
+        '  // Leave empty string "" to use global default from ~/.config/nadamu/c2pa.json ("NADAMU")',
+        '  "watermark": {',
+        f'    "text": "{wm_text}"',
+        '  }',
+        "}",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def load_or_resolve_manifest(
@@ -2185,8 +2338,9 @@ def load_or_resolve_manifest(
     manifest: dict[str, Any] = {}
     if manifest_file.is_file():
         try:
-            with open(manifest_file, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            content = manifest_file.read_text(encoding="utf-8")
+            clean_content = strip_json_comments(content)
+            manifest = json.loads(clean_content)
         except Exception as e:
             log_warn(f"Failed to read existing manifest {manifest_file}: {e}")
             manifest = {}
@@ -2207,9 +2361,7 @@ def load_or_resolve_manifest(
             save_path = target_dir / "manifest.json"
             try:
                 save_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(save_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest, f, indent=2)
-                    f.write("\n")
+                save_path.write_text(render_manifest_json(manifest), encoding="utf-8")
                 log_ok(f"Generated asset manifest ({manifest['aspect_ratio']}): {save_path.name}")
             except Exception as e:
                 log_warn(f"Could not save manifest: {e}")
@@ -2227,6 +2379,19 @@ def load_or_resolve_manifest(
                     {"width": 64, "height": 64, "label": "64"},
                     {"width": 32, "height": 32, "label": "32"},
                 ],
+                "signed": {
+                    "enabled": False,
+                    "sizes": [],
+                },
+                "metadata": {
+                    "author": "",
+                    "domain": "",
+                    "license": "",
+                    "description": "",
+                },
+                "watermark": {
+                    "text": "",
+                },
             }
     elif manifest.get("aspect_ratio") == "auto":
         # Manifest exists from init with "auto" aspect ratio: update ratio and dimensions, but keep user custom fields
@@ -2243,11 +2408,15 @@ def load_or_resolve_manifest(
             ]):
                 manifest["targets"] = auto_m["targets"]
                 manifest["generate_favicon"] = auto_m["generate_favicon"]
+            if "signed" not in manifest:
+                manifest["signed"] = auto_m["signed"]
+            if "metadata" not in manifest:
+                manifest["metadata"] = auto_m["metadata"]
+            if "watermark" not in manifest:
+                manifest["watermark"] = auto_m["watermark"]
             save_path = target_dir / "manifest.json"
             try:
-                with open(save_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest, f, indent=2)
-                    f.write("\n")
+                save_path.write_text(render_manifest_json(manifest), encoding="utf-8")
                 log_ok(f"Updated asset manifest ({manifest['aspect_ratio']}): {save_path.name}")
             except Exception as e:
                 log_warn(f"Could not save manifest: {e}")
@@ -2410,11 +2579,22 @@ def execute_init(
                 {"width": 64, "height": 64, "label": "64"},
                 {"width": 32, "height": 32, "label": "32"},
             ],
+            "signed": {
+                "enabled": False,
+                "sizes": [],
+            },
+            "metadata": {
+                "author": "",
+                "domain": "",
+                "license": "",
+                "description": "",
+            },
+            "watermark": {
+                "text": "",
+            },
         }
         try:
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump(manifest_data, f, indent=2)
-                f.write("\n")
+            manifest_path.write_text(render_manifest_json(manifest_data), encoding="utf-8")
             log_ok(f"Build Manifest: {manifest_path}")
         except Exception as e:
             log_warn(f"Failed to create manifest {manifest_path}: {e}")
@@ -3138,6 +3318,14 @@ def execute_build(
 
     if not no_sign and items_to_sign_pending:
         cfg = load_config()
+        manifest_meta = manifest.get("metadata") or {}
+        manifest_wm = manifest.get("watermark") or {}
+        manifest_author = manifest_meta.get("author") or None
+        manifest_domain = manifest_meta.get("domain") or None
+        manifest_license = manifest_meta.get("license") or None
+        manifest_description = manifest_meta.get("description") or None
+        manifest_wm_text = manifest_wm.get("text") or None
+
         is_agent_mode = use_agent or (cfg.get("signing_mode") == "ssh-agent" and not bw_item)
 
         # 1. Derive watermark permutation secret once for entire build
@@ -3162,7 +3350,7 @@ def execute_build(
                 try:
                     batch_signer = create_c2pa_session_signer_from_ssh_agent(
                         key_comment=k_target,
-                        domain=cfg.get("domain", DEFAULT_DOMAIN),
+                        domain=manifest_domain or cfg.get("domain", DEFAULT_DOMAIN),
                     )
                     log_ok(f"Session signer active: single SSH authorization covers all {len(items_to_sign_pending)} release(s).")
                 except Exception as e:
@@ -3200,6 +3388,11 @@ def execute_build(
             process_signing(
                 input_path=src_file,
                 output_path=dst_file,
+                author=manifest_author,
+                domain=manifest_domain,
+                license_text=manifest_license,
+                description=manifest_description,
+                watermark_payload=manifest_wm_text,
                 stamp=(not no_stamp),
                 bw_item=bw_item,
                 use_agent=use_agent,
