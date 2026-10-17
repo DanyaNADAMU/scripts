@@ -33,7 +33,11 @@ _media_completions() {
             COMPREPLY=( $(compgen -f -- "$cur") )
             return 0
             ;;
-        --sizes|--bw-item|-s|--secret|-w|--watermark|-t|--title|-a|--author|--interval)
+        --sizes|--bw-item|-s|--secret|-w|--watermark|-t|--title|-a|--author|--interval|--pad-color)
+            return 0
+            ;;
+        --resize-mode)
+            COMPREPLY=( $(compgen -W "pad crop stretch fit" -- "$cur") )
             return 0
             ;;
     esac
@@ -45,7 +49,7 @@ _media_completions() {
             return 0
             ;;
         build)
-            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --agent --ssh-agent --key-name --bw --bw-item --no-sign --no-stamp --force -h --help"
+            local opts="-m --master -r --raw -d --dir -p --proofs-dir --sizes --resize-mode --pad-color --agent --ssh-agent --key-name --bw --bw-item --no-sign --no-stamp --force -h --help"
             if [ -d "$icons_dir" ]; then
                 local assets
                 assets="$(find "$icons_dir" -maxdepth 1 -mindepth 1 -type d ! -name ".*" -exec basename {} \; 2>/dev/null)"

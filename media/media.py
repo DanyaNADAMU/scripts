@@ -180,6 +180,213 @@ def render_svg_to_image(svg_path: Path, width: int, height: int) -> Image.Image:
     )
 
 
+def parse_pad_color(val: str | None) -> tuple[int, int, int, int]:
+    """Parses color string ('transparent', '#HEX', 'white', etc.) to RGBA 4-tuple."""
+    if not val or str(val).lower() in ("transparent", "none", "alpha"):
+        return (0, 0, 0, 0)
+    try:
+        from PIL import ImageColor
+
+        return ImageColor.getcolor(val, "RGBA")
+    except Exception:
+        return (0, 0, 0, 0)
+
+
+def discover_sources(
+    search_dir: Path,
+    explicit_master: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Discovers all vector and raster source images in directory with dimensions and aspect ratios."""
+    sources: list[dict[str, Any]] = []
+    seen_paths: set[Path] = set()
+
+    def _add_source(f: Path) -> None:
+        if f.resolve() in seen_paths or not f.is_file():
+            return
+        if f.name.startswith(".") or f.name.endswith(".ots"):
+            return
+        sfx = f.suffix.lower()
+        if sfx not in (".svg", ".png", ".webp", ".jpg", ".jpeg"):
+            return
+
+        seen_paths.add(f.resolve())
+        is_vec = sfx == ".svg"
+        if is_vec:
+            w, h = get_svg_dimensions(f)
+        else:
+            try:
+                with Image.open(f) as im:
+                    w, h = im.size
+            except Exception:
+                w, h = 0, 0
+
+        sources.append({
+            "path": f,
+            "name": f.name,
+            "stem": f.stem,
+            "suffix": sfx,
+            "is_vector": is_vec,
+            "width": w,
+            "height": h,
+            "aspect_ratio": (w / h) if (w > 0 and h > 0) else 1.0,
+        })
+
+    if explicit_master and explicit_master.is_file():
+        _add_source(explicit_master)
+
+    if search_dir.is_dir():
+        for f in sorted(search_dir.iterdir()):
+            _add_source(f)
+
+    return sources
+
+
+def select_best_source(
+    sources: list[dict[str, Any]],
+    target_width: int,
+    target_height: int,
+    explicit_name: str | None = None,
+) -> dict[str, Any]:
+    """Selects the best matching source image for target dimensions and policy.
+
+    Matching priority:
+    1. Explicit source filename / stem match if provided in manifest/target.
+    2. Minimal aspect ratio divergence |R_source - R_target|.
+    3. Vector format preference (SVG renders sharp at arbitrary target resolutions).
+    4. Minimal downscale/upscale penalty (prefers sources larger than target).
+    """
+    if not sources:
+        raise ValueError("No candidate source images available for rendering.")
+
+    if explicit_name:
+        clean_exp = explicit_name.strip()
+        for s in sources:
+            if s["name"] == clean_exp or s["stem"] == clean_exp or s["path"].name == clean_exp:
+                return s
+        log_warn(
+            f"Explicit source '{explicit_name}' not found; falling back to automatic aspect ratio matching."
+        )
+
+    target_ratio = (target_width / target_height) if target_height > 0 else 1.0
+
+    def score(src: dict[str, Any]) -> tuple[float, int, int, int]:
+        ratio_diff = abs(src["aspect_ratio"] - target_ratio)
+        ratio_bucket = round(ratio_diff, 2)
+        vector_penalty = 0 if src["is_vector"] else 1
+        src_area = src["width"] * src["height"]
+        target_area = target_width * target_height
+        upscale_penalty = 1 if (src_area < target_area and not src["is_vector"]) else 0
+        return (ratio_bucket, vector_penalty, upscale_penalty, -src_area)
+
+    return min(sources, key=score)
+
+
+def render_source_to_canvas(
+    src: dict[str, Any],
+    tw: int,
+    th: int,
+    resize_mode: str = "pad",
+    pad_color: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Image.Image:
+    """Renders a vector or raster source into an exact (tw, th) PIL RGBA canvas using the specified policy."""
+    mode = (resize_mode or "pad").lower()
+    tw = max(1, tw)
+    th = max(1, th)
+
+    if src["is_vector"]:
+        sw, sh = src["width"], src["height"]
+        r_src = (sw / sh) if (sw > 0 and sh > 0) else (tw / th)
+        r_target = tw / th
+
+        if abs(r_src - r_target) < 0.01:
+            return render_svg_to_image(src["path"], tw, th)
+
+        if mode in ("pad", "contain", "letterbox"):
+            if r_src > r_target:
+                rw = tw
+                rh = max(1, round(tw / r_src))
+            else:
+                rh = th
+                rw = max(1, round(th * r_src))
+            rendered = render_svg_to_image(src["path"], rw, rh)
+            canvas = Image.new("RGBA", (tw, th), pad_color)
+            canvas.paste(rendered, ((tw - rw) // 2, (th - rh) // 2), rendered)
+            return canvas
+
+        elif mode in ("crop", "cover"):
+            if r_src > r_target:
+                rh = th
+                rw = max(tw, round(th * r_src))
+                rendered = render_svg_to_image(src["path"], rw, rh)
+                left = (rw - tw) // 2
+                return rendered.crop((left, 0, left + tw, th))
+            else:
+                rw = tw
+                rh = max(th, round(tw / r_src))
+                rendered = render_svg_to_image(src["path"], rw, rh)
+                top = (rh - th) // 2
+                return rendered.crop((0, top, tw, top + th))
+
+        elif mode in ("stretch", "fill"):
+            rendered = render_svg_to_image(src["path"], tw, th)
+            if rendered.size != (tw, th):
+                rendered = rendered.resize((tw, th), Image.Resampling.LANCZOS)
+            return rendered
+
+        else:  # "fit" without canvas padding
+            return render_svg_to_image(src["path"], tw, th)
+
+    else:
+        # Raster source
+        with Image.open(src["path"]) as im:
+            rgba = im.convert("RGBA")
+        sw, sh = rgba.size
+        r_src = (sw / sh) if (sw > 0 and sh > 0) else (tw / th)
+        r_target = tw / th
+
+        if abs(r_src - r_target) < 0.01:
+            return rgba.resize((tw, th), Image.Resampling.LANCZOS)
+
+        if mode in ("pad", "contain", "letterbox"):
+            if r_src > r_target:
+                rw = tw
+                rh = max(1, round(tw / r_src))
+            else:
+                rh = th
+                rw = max(1, round(th * r_src))
+            scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGBA", (tw, th), pad_color)
+            canvas.paste(scaled, ((tw - rw) // 2, (th - rh) // 2), scaled)
+            return canvas
+
+        elif mode in ("crop", "cover"):
+            if r_src > r_target:
+                rh = th
+                rw = max(tw, round(th * r_src))
+                scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+                left = (rw - tw) // 2
+                return scaled.crop((left, 0, left + tw, th))
+            else:
+                rw = tw
+                rh = max(th, round(tw / r_src))
+                scaled = rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+                top = (rh - th) // 2
+                return scaled.crop((0, top, tw, top + th))
+
+        elif mode in ("stretch", "fill"):
+            return rgba.resize((tw, th), Image.Resampling.LANCZOS)
+
+        else:  # "fit" without canvas padding
+            if r_src > r_target:
+                rw = tw
+                rh = max(1, round(tw / r_src))
+            else:
+                rh = th
+                rw = max(1, round(th * r_src))
+            return rgba.resize((rw, rh), Image.Resampling.LANCZOS)
+
+
+
 # ------------------------------------------------------------------------------
 # Configuration Management
 # ------------------------------------------------------------------------------
@@ -2178,7 +2385,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 854, "height": 480, "label": "854x480"},
             {"width": 640, "height": 360, "label": "640x360"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     elif abs(r - 16 / 10) < 0.03:
         ratio_name = "16:10"
         targets = [
@@ -2187,7 +2394,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 1280, "height": 800, "label": "1280x800"},
             {"width": 640, "height": 400, "label": "640x400"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     elif abs(r - 4 / 3) < 0.03:
         ratio_name = "4:3"
         targets = [
@@ -2196,7 +2403,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 800, "height": 600, "label": "800x600"},
             {"width": 640, "height": 480, "label": "640x480"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     elif abs(r - 21 / 9) < 0.05 or abs(r - 64 / 27) < 0.05:
         ratio_name = "21:9"
         targets = [
@@ -2204,7 +2411,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 1920, "height": 810, "label": "1920x810"},
             {"width": 1280, "height": 540, "label": "1280x540"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     elif abs(r - 9 / 16) < 0.03:
         ratio_name = "9:16"
         targets = [
@@ -2212,7 +2419,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 720, "height": 1280, "label": "720x1280"},
             {"width": 360, "height": 640, "label": "360x640"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     elif abs(r - 3 / 4) < 0.03:
         ratio_name = "3:4"
         targets = [
@@ -2220,7 +2427,7 @@ def detect_aspect_ratio_and_targets(
             {"width": 900, "height": 1200, "label": "900x1200"},
             {"width": 600, "height": 800, "label": "600x800"},
         ]
-        generate_favicon = False
+        generate_favicon = True
     else:
         gcd_val = math.gcd(w, h)
         ratio_name = f"{w // gcd_val}:{h // gcd_val}" if gcd_val > 1 else f"{w}x{h}"
@@ -2229,7 +2436,7 @@ def detect_aspect_ratio_and_targets(
             tw = max(16, round(w * step))
             th = max(16, round(h * step))
             targets.append({"width": tw, "height": th, "label": f"{tw}x{th}"})
-        generate_favicon = (w == h)
+        generate_favicon = True
 
     # Filter out targets larger than master image
     filtered_targets = [t for t in targets if t["width"] <= w * 1.05 and t["height"] <= h * 1.05]
@@ -2247,6 +2454,8 @@ def detect_aspect_ratio_and_targets(
         "version": version,
         "aspect_ratio": ratio_name,
         "master_dimensions": f"{w}x{h}",
+        "resize_mode": "pad",
+        "pad_color": "transparent",
         "generate_favicon": generate_favicon,
         "formats": ["webp", "png"],
         "targets": filtered_targets,
@@ -2287,6 +2496,8 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
     version = manifest.get("version", "v1")
     aspect_ratio = manifest.get("aspect_ratio", "auto")
     master_dim = manifest.get("master_dimensions", "")
+    resize_mode = manifest.get("resize_mode", "pad")
+    pad_color = manifest.get("pad_color", "transparent")
     gen_favicon = bool(manifest.get("generate_favicon", True))
     formats = manifest.get("formats", ["webp", "png"])
     targets = manifest.get("targets", [])
@@ -2314,7 +2525,14 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
             w = t.get("width")
             h = t.get("height")
             lbl = t.get("label", str(w) if w == h else f"{w}x{h}")
-            target_lines.append(f'    {{ "width": {w}, "height": {h}, "label": "{lbl}" }}')
+            parts = [f'"width": {w}', f'"height": {h}', f'"label": "{lbl}"']
+            if "resize_mode" in t:
+                parts.append(f'"resize_mode": "{t["resize_mode"]}"')
+            if "pad_color" in t:
+                parts.append(f'"pad_color": "{t["pad_color"]}"')
+            if "source" in t:
+                parts.append(f'"source": "{t["source"]}"')
+            target_lines.append(f'    {{ {", ".join(parts)} }}')
         elif isinstance(t, int):
             target_lines.append(f'    {t}')
         else:
@@ -2357,9 +2575,19 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
 
     lines.extend([
         "",
+        '  // Fitting Policy & Canvas Padding (when source and target aspect ratios differ):',
+        '  // Options: "pad" (letterbox with transparent alpha borders, preserves entire graphic),',
+        '  //          "crop" (center-crop to fill target dimensions),',
+        '  //          "stretch" (resizes without preserving aspect ratio),',
+        '  //          "fit" (scales to fit within target bounding box without canvas padding)',
+        f'  "resize_mode": "{resize_mode}",',
+        '  // Background color for "pad" mode: "transparent" (RGBA alpha=0), or hex color e.g. "#ffffff"',
+        f'  "pad_color": "{pad_color}",',
+        "",
         '  // Favicon Generation:',
         '  // When true, generates multi-resolution generated/favicon.ico (16, 32, 48, 64, 128, 256 layers).',
-        '  // For vector SVG masters, layers are rasterized directly from vector for maximum clarity.',
+        '  // Multi-source selection: if a 1:1 square source exists in to_generate/, it is automatically prioritized.',
+        '  // For rectangular sources, "resize_mode" (default "pad") renders clean icons with alpha padding.',
         f'  "generate_favicon": {gen_favicon_str},',
         "",
         '  // Distribution Formats (rendered into generated/):',
@@ -2369,6 +2597,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         '  // Distribution Resolutions (rendered into generated/):',
         '  // For raster masters: resized with Lanczos filter. For vector SVG: rasterized at native sharpness.',
         '  // Supports objects {"width": 512, "height": 512, "label": "512"}, numbers [512, 256], or strings ["1920x1080"]',
+        '  // Targets can optionally specify custom "resize_mode", "pad_color", or explicit "source" filename.',
     ])
 
     if target_lines:
@@ -2463,6 +2692,8 @@ def load_or_resolve_manifest(
                 "name": name,
                 "version": version,
                 "aspect_ratio": "1:1",
+                "resize_mode": "pad",
+                "pad_color": "transparent",
                 "generate_favicon": True,
                 "formats": ["webp", "png"],
                 "targets": [
@@ -2492,6 +2723,10 @@ def load_or_resolve_manifest(
             auto_m = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
             manifest["aspect_ratio"] = auto_m["aspect_ratio"]
             manifest["master_dimensions"] = auto_m["master_dimensions"]
+            if "resize_mode" not in manifest:
+                manifest["resize_mode"] = auto_m.get("resize_mode", "pad")
+            if "pad_color" not in manifest:
+                manifest["pad_color"] = auto_m.get("pad_color", "transparent")
             if master_path and master_path.suffix.lower() == ".svg":
                 if "svg" not in manifest.get("formats", []):
                     manifest.setdefault("formats", []).append("svg")
@@ -2666,6 +2901,8 @@ def execute_init(
             "name": name,
             "version": version,
             "aspect_ratio": "auto",
+            "resize_mode": "pad",
+            "pad_color": "transparent",
             "generate_favicon": True,
             "formats": ["webp", "png"],
             "targets": [
@@ -2966,6 +3203,8 @@ def execute_build(
     proofs_dir: Path | None = None,
     sizes: list[int] | None = None,
     sizes_cli: str | None = None,
+    resize_mode: str | None = None,
+    pad_color: str | None = None,
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
@@ -3007,41 +3246,46 @@ def execute_build(
         if (target_dir / "02_signed").is_dir():
             signed_dir = target_dir / "02_signed"
 
-    # Auto-detect master image if not provided
+    # Discover all candidate source images in to_generate/ (and legacy locations)
+    search_gen_dir = to_gen_dir
+    if not search_gen_dir.is_dir() and legacy_master_dir and legacy_master_dir.is_dir():
+        search_gen_dir = legacy_master_dir
+    elif not search_gen_dir.is_dir() and to_sign_dir.is_dir():
+        search_gen_dir = to_sign_dir
+
+    sources = discover_sources(search_gen_dir, explicit_master=master_path)
+
+    # Auto-detect primary master image if not provided
     if master_path is None:
-        if to_gen_dir.is_dir():
+        if sources:
+            # Prefer vector source, then first source
+            master_source = next((s for s in sources if s["is_vector"]), sources[0])
+            master_path = master_source["path"]
+            log_info(f"Auto-detected primary master: {master_path.name}")
+        elif to_gen_dir.is_dir():
             candidates = [
                 f for f in sorted(to_gen_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
-            if img_cands:
-                master_path = img_cands[0]
-                log_info(f"Auto-detected master image: {master_path.name}")
-            elif candidates:
+            if candidates:
                 master_path = candidates[0]
-                log_info(f"Auto-detected master image: {master_path.name}")
+                log_info(f"Auto-detected master: {master_path.name}")
         elif legacy_master_dir and legacy_master_dir.is_dir():
             candidates = [
                 f for f in sorted(legacy_master_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
-            if img_cands:
-                master_path = img_cands[0]
-                log_info(f"Auto-detected master image (legacy): {master_path.name}")
-            elif candidates:
+            if candidates:
                 master_path = candidates[0]
-                log_info(f"Auto-detected master image (legacy): {master_path.name}")
+                log_info(f"Auto-detected master (legacy): {master_path.name}")
         elif to_sign_dir.is_dir():
             candidates = [
                 f for f in sorted(to_sign_dir.iterdir())
                 if f.is_file() and not f.name.endswith(".ots") and not f.name.startswith(".")
             ]
-            img_cands = [f for f in candidates if f.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg")]
-            if img_cands:
-                master_path = img_cands[0]
-                log_info(f"Auto-detected master image in to_sign/: {master_path.name}")
+            if candidates:
+                master_path = candidates[0]
+                log_info(f"Auto-detected master in to_sign/: {master_path.name}")
 
     # Auto-organize project canvas files (.xcf, .psd, .kra, .blend, .ai) into raw/
     raw_dest_dir.mkdir(parents=True, exist_ok=True)
@@ -3115,6 +3359,15 @@ def execute_build(
         master_path=master_path,
         sizes_cli=manifest_cli_str,
     )
+    if resize_mode:
+        manifest["resize_mode"] = resize_mode
+    if pad_color:
+        manifest["pad_color"] = pad_color
+
+    eff_resize_mode = manifest.get("resize_mode", "pad")
+    eff_pad_color_str = manifest.get("pad_color", "transparent")
+    eff_pad_color = parse_pad_color(eff_pad_color_str)
+
     targets = manifest.get("targets", [])
     formats = manifest.get("formats", ["webp", "png"])
     aspect_ratio = manifest.get("aspect_ratio", "auto")
@@ -3124,8 +3377,13 @@ def execute_build(
     if target_proofs_dir:
         log_info(f"Proofs Archive:   {target_proofs_dir}")
     log_info(f"Master Image:     {master_path}")
+    if len(sources) > 1:
+        extra_src_str = ", ".join(f"{s['name']} ({s['width']}x{s['height']})" for s in sources if s["path"] != master_path)
+        if extra_src_str:
+            log_info(f"Extra Sources:    {extra_src_str}")
     if raw_path:
         log_info(f"Raw Project:      {raw_path}")
+    log_info(f"Fitting Policy:   {eff_resize_mode} (pad color: {eff_pad_color_str})")
     log_info(f"Aspect Ratio:     {aspect_ratio} ({len(targets)} targets: {', '.join(t.get('label', '') for t in targets)})")
 
     # 1. Pre-flight Audit if target directory exists
@@ -3208,6 +3466,21 @@ def execute_build(
     dest_master.chmod(0o444)
     log_ok(f"Master image staged: {dest_master.name} (0444)")
 
+    # Ensure all extra discovered sources are staged into to_gen_dir
+    for s in sources:
+        if s["path"].parent.resolve() != to_gen_dir.resolve() and (
+            legacy_master_dir is None or s["path"].parent.resolve() != legacy_master_dir.resolve()
+        ):
+            dst_s = to_gen_dir / s["path"].name
+            if dst_s.resolve() != s["path"].resolve():
+                if dst_s.is_file():
+                    dst_s.unlink()
+                shutil.copyfile(s["path"], dst_s)
+            dst_s.chmod(0o444)
+            s["path"] = dst_s
+        elif s["path"].resolve() == master_path.resolve():
+            s["path"] = dest_master
+
     # Anchor raw master and extra input files in to_sign/ with OTS before C2PA modifications
     if not no_stamp:
         to_sign_to_stamp: list[tuple[Path, Path]] = []
@@ -3254,107 +3527,73 @@ def execute_build(
     # 4. Stage 3: Render Multi-Scale Distribution (generated/) and Batch-Stamp with OTS
     log_info(f"Rendering distribution assets ({len(targets)} targets) into {gen_dir.name}/...")
     generated_count = 0
-    is_vector = (dest_master.suffix.lower() == ".svg")
     try:
-        if is_vector:
-            svg_w, svg_h = get_svg_dimensions(dest_master)
-            is_square = (svg_w == svg_h) if (svg_w > 0 and svg_h > 0) else True
+        # Multi-layer favicon.ico container
+        gen_favicon = bool(manifest.get("generate_favicon", True))
+        if gen_favicon:
+            fav_src_name = manifest.get("favicon_source")
+            fav_source = select_best_source(sources, 256, 256, explicit_name=fav_src_name)
+            fav_mode = manifest.get("favicon_resize_mode", eff_resize_mode)
+            fav_pad_color = parse_pad_color(manifest.get("favicon_pad_color", eff_pad_color_str))
 
-            # Multi-layer favicon.ico container from SVG
-            gen_favicon = manifest.get("generate_favicon", is_square)
-            if gen_favicon:
-                ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-                ico_path = gen_dir / "favicon.ico"
-                if ico_path.is_file():
-                    ico_path.unlink()
-                if is_square:
-                    ico_layers = [render_svg_to_image(dest_master, iw, ih) for iw, ih in ico_sizes]
-                    ico_layers[-1].save(ico_path, format="ICO", sizes=ico_sizes, append_images=ico_layers[:-1])
-                else:
-                    base_dim = max(svg_w, svg_h) if (svg_w > 0 and svg_h > 0) else 512
-                    sq_render = render_svg_to_image(dest_master, base_dim, base_dim)
-                    sq_dim = min(sq_render.width, sq_render.height)
-                    left = (sq_render.width - sq_dim) // 2
-                    top = (sq_render.height - sq_dim) // 2
-                    crop_sq = sq_render.crop((left, top, left + sq_dim, top + sq_dim))
-                    crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
-                ico_path.chmod(0o444)
+            ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+            ico_path = gen_dir / "favicon.ico"
+            if ico_path.is_file():
+                ico_path.unlink()
+
+            ico_layers = [
+                render_source_to_canvas(fav_source, iw, ih, resize_mode=fav_mode, pad_color=fav_pad_color)
+                for iw, ih in ico_sizes
+            ]
+            ico_layers[-1].save(ico_path, format="ICO", sizes=ico_sizes, append_images=ico_layers[:-1])
+            ico_path.chmod(0o444)
+            generated_count += 1
+            log_ok(
+                f"Rendered multi-resolution favicon.ico (16..256) from {fav_source['name']} (mode: {fav_mode})"
+            )
+
+        # Render raster targets directly using best matching source
+        for t in targets:
+            tw, th = t["width"], t["height"]
+            lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
+            t_mode = t.get("resize_mode", eff_resize_mode)
+            t_pad = parse_pad_color(t.get("pad_color", eff_pad_color_str))
+            t_src_name = t.get("source")
+
+            best_src = select_best_source(sources, tw, th, explicit_name=t_src_name)
+            res_img = render_source_to_canvas(best_src, tw, th, resize_mode=t_mode, pad_color=t_pad)
+
+            if "webp" in formats:
+                out_webp = gen_dir / f"{name}_{lbl}.webp"
+                if out_webp.is_file():
+                    out_webp.unlink()
+                res_img.save(out_webp, format="WEBP", quality=90, method=6)
+                out_webp.chmod(0o444)
                 generated_count += 1
-                log_ok("Rendered multi-resolution favicon.ico (16..256)")
+            if "png" in formats:
+                out_png = gen_dir / f"{name}_{lbl}.png"
+                if out_png.is_file():
+                    out_png.unlink()
+                res_img.save(out_png, format="PNG", optimize=True)
+                out_png.chmod(0o444)
+                generated_count += 1
 
-            # Render raster targets directly from vector for razor-sharp edge precision
-            for t in targets:
-                tw, th = t["width"], t["height"]
-                lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
-                res_img = render_svg_to_image(dest_master, tw, th)
-                if "webp" in formats:
-                    out_webp = gen_dir / f"{name}_{lbl}.webp"
-                    if out_webp.is_file():
-                        out_webp.unlink()
-                    res_img.save(out_webp, format="WEBP", quality=90, method=6)
-                    out_webp.chmod(0o444)
-                    generated_count += 1
-                if "png" in formats:
-                    out_png = gen_dir / f"{name}_{lbl}.png"
-                    if out_png.is_file():
-                        out_png.unlink()
-                    res_img.save(out_png, format="PNG", optimize=True)
-                    out_png.chmod(0o444)
-                    generated_count += 1
-
-            # Export distribution SVG asset
-            if "svg" in formats or is_vector:
-                out_svg = gen_dir / f"{name}.svg"
-                if out_svg.resolve() != dest_master.resolve():
+        # Export distribution vector assets
+        vector_sources = [s for s in sources if s["is_vector"]]
+        if "svg" in formats or vector_sources:
+            for v_src in vector_sources:
+                if v_src["path"].name == dest_master.name or len(vector_sources) == 1:
+                    out_svg = gen_dir / f"{name}.svg"
+                else:
+                    out_svg = gen_dir / f"{name}_{v_src['stem']}.svg"
+                if out_svg.resolve() != v_src["path"].resolve():
                     if out_svg.is_file():
                         out_svg.unlink()
-                    shutil.copyfile(dest_master, out_svg)
+                    shutil.copyfile(v_src["path"], out_svg)
                 out_svg.chmod(0o444)
                 generated_count += 1
                 log_ok(f"Exported distribution vector asset: {out_svg.name}")
 
-        else:
-            with Image.open(dest_master) as pil_master:
-                rgba_base = pil_master.convert("RGBA")
-                is_square = (rgba_base.width == rgba_base.height)
-
-                # Multi-layer favicon.ico container
-                gen_favicon = manifest.get("generate_favicon", is_square)
-                if gen_favicon:
-                    ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-                    ico_path = gen_dir / "favicon.ico"
-                    if ico_path.is_file():
-                        ico_path.unlink()
-                    if is_square:
-                        rgba_base.save(ico_path, format="ICO", sizes=ico_sizes)
-                    else:
-                        sq_dim = min(rgba_base.width, rgba_base.height)
-                        left = (rgba_base.width - sq_dim) // 2
-                        top = (rgba_base.height - sq_dim) // 2
-                        crop_sq = rgba_base.crop((left, top, left + sq_dim, top + sq_dim))
-                        crop_sq.save(ico_path, format="ICO", sizes=ico_sizes)
-                    ico_path.chmod(0o444)
-                    generated_count += 1
-                    log_ok("Rendered multi-resolution favicon.ico (16..256)")
-
-                for t in targets:
-                    tw, th = t["width"], t["height"]
-                    lbl = t.get("label") or (str(tw) if tw == th else f"{tw}x{th}")
-                    res_img = rgba_base.resize((tw, th), Image.Resampling.LANCZOS)
-                    if "webp" in formats:
-                        out_webp = gen_dir / f"{name}_{lbl}.webp"
-                        if out_webp.is_file():
-                            out_webp.unlink()
-                        res_img.save(out_webp, format="WEBP", quality=90, method=6)
-                        out_webp.chmod(0o444)
-                        generated_count += 1
-                    if "png" in formats:
-                        out_png = gen_dir / f"{name}_{lbl}.png"
-                        if out_png.is_file():
-                            out_png.unlink()
-                        res_img.save(out_png, format="PNG", optimize=True)
-                        out_png.chmod(0o444)
-                        generated_count += 1
     except Exception as e:
         log_err(f"Failed during generated rendering: {e}")
         sys.exit(1)
@@ -3435,16 +3674,13 @@ def execute_build(
             if not any(dst == target_dst for _, dst, _ in items_to_sign):
                 showcase_tmp = target_dir / f".tmp_showcase_{name}_{lbl}.png"
                 try:
-                    if dest_master.suffix.lower() == ".svg":
-                        showcase_img = render_svg_to_image(dest_master, tw, th)
-                    else:
-                        with Image.open(dest_master) as pil_master:
-                            showcase_img = pil_master.convert("RGBA")
-                            if (showcase_img.width, showcase_img.height) != (tw, th):
-                                showcase_img = showcase_img.resize((tw, th), Image.Resampling.LANCZOS)
-                        if showcase_tmp.is_file():
-                            showcase_tmp.unlink()
-                        showcase_img.save(showcase_tmp, format="PNG")
+                    best_src = select_best_source(sources, tw, th, explicit_name=st.get("source"))
+                    st_mode = st.get("resize_mode", eff_resize_mode)
+                    st_pad = parse_pad_color(st.get("pad_color", eff_pad_color_str))
+                    showcase_img = render_source_to_canvas(best_src, tw, th, resize_mode=st_mode, pad_color=st_pad)
+                    if showcase_tmp.is_file():
+                        showcase_tmp.unlink()
+                    showcase_img.save(showcase_tmp, format="PNG")
                     items_to_sign.append((showcase_tmp, target_dst, f"Showcase release {tw}x{th} ({target_dst.name})"))
                 except Exception as e:
                     log_warn(f"Could not render legacy showcase target {lbl}: {e}")
@@ -4040,6 +4276,18 @@ Automation & Keys Examples:
     p_build.add_argument("-d", "--dir", type=Path, help="Base icons library directory")
     p_build.add_argument("-p", "--proofs-dir", type=Path, help="Separated proofs library directory")
     p_build.add_argument("--sizes", type=str, default=None, help="Comma-separated generated resolutions or WxH sizes (overrides manifest.json)")
+    p_build.add_argument(
+        "--resize-mode",
+        choices=["pad", "crop", "stretch", "fit"],
+        default=None,
+        help="Fitting policy when source and target aspect ratios differ (overrides manifest.json)",
+    )
+    p_build.add_argument(
+        "--pad-color",
+        type=str,
+        default=None,
+        help="Padding background color for 'pad' mode (e.g. 'transparent', '#ffffff')",
+    )
     p_build.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
     p_build.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Bitwarden item name for C2PA keys")
@@ -4172,6 +4420,8 @@ Automation & Keys Examples:
             base_dir=base_dir,
             proofs_dir=proofs_base,
             sizes_cli=args.sizes,
+            resize_mode=getattr(args, "resize_mode", None),
+            pad_color=getattr(args, "pad_color", None),
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),

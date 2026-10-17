@@ -37,11 +37,13 @@ _media() {
                     _arguments \
                         '1:asset name:' \
                         '2:version tag:' \
-                        '(-m --master)'{-m,--master}'[Cropped square master image]:master file:_files -g "*.([pP][nN][gG]|[wW][eE][bB][pP]|[jJ][pP][gG]|[jJ][pP][eE][gG])"' \
+                        '(-m --master)'{-m,--master}'[Master image (PNG/WebP/SVG/JPG)]:master file:_files -g "*.([pP][nN][gG]|[wW][eE][bB][pP]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[sS][vV][gG])"' \
                         '(-r --raw)'{-r,--raw}'[Raw project canvas (XCF/PSD/SVG)]:raw file:_files' \
                         '(-d --dir)'{-d,--dir}'[Base icons library directory]:icons directory:_files -/' \
                         '(-p --proofs-dir)'{-p,--proofs-dir}'[Separated proofs library directory]:proofs directory:_files -/' \
                         '--sizes[Comma-separated dist resolutions]:resolutions:' \
+                        '--resize-mode[Fitting policy when aspect ratios differ]:resize mode:(pad crop stretch fit)' \
+                        '--pad-color[Padding background color for pad mode]:color:' \
                         '(--agent --ssh-agent)'{--agent,--ssh-agent}'[Sign via SSH Agent (Bitwarden Authorize prompt, 0 keys in RAM)]' \
                         '--key-name[SSH key comment in agent (default: c2pa-signer)]:key comment:' \
                         '--bw[Fetch C2PA credentials from Bitwarden into RAM]::item name:' \

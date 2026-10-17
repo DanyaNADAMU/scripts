@@ -95,7 +95,7 @@ It integrates three independent cryptographic layers into a unified workflow:
 Initializes the standardized directory hierarchy (\fBsource/raw/\fR, \fBsource/master/\fR, \fBsigned/\fR, \fBdist/\fR, and the corresponding proofs directory) and generates a default \fBmanifest.json\fR for a new asset version tag without building files.
 .TP
 .B build \fIname\fR \fIversion\fR
-Constructs a complete versioned release from source materials. Automatically discovers existing master and raw files in \fBsource/\fR, auto-detects aspect ratio (1:1, 16:9, 4:3, etc.) or reads target resolutions from \fBmanifest.json\fR. Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, and multi-layer \fBfavicon.ico\fR), and updates the atomic \fBlatest\fR symlink.
+Constructs a complete versioned release from source materials in \fBto_sign/to_generate/\fR. Automatically discovers all source canvases (SVG, PNG, WebP), intelligently matches optimal source images to targets based on aspect ratio and vector format, and applies fitting policies (\fBpad\fR with alpha letterboxing, \fBcrop\fR, \fBstretch\fR, or \fBfit\fR). Locks source files (\fBchmod 0444\fR), anchors sources in Bitcoin, produces the signed 1024px showcase release, generates downscaled distribution formats (WebP, PNG, SVG), multi-layer \fBfavicon.ico\fR, and updates the atomic \fBlatest\fR symlink.
 .TP
 .B audit [\fIname\fR] [\fIversion\fR]
 Executes a full non-blocking diagnostic pass across an asset version, an entire asset, or the whole library.
@@ -159,6 +159,12 @@ Base directory for the separated OpenTimestamps proofs archive (default: sibling
 .TP
 .BI \-\-sizes " list"
 Comma-separated list of target resolutions or WxH dimensions (e.g. \fB512,256\fR or \fB1920x1080,1280x720\fR) overriding \fBmanifest.json\fR.
+.TP
+.BI \-\-resize\-mode " mode"
+Sets the canvas fitting policy when source and target aspect ratios differ (\fBpad\fR, \fBcrop\fR, \fBstretch\fR, \fBfit\fR). Defaults to \fBpad\fR (letterboxing with transparent alpha margins). Overrides \fBmanifest.json\fR.
+.TP
+.BI \-\-pad\-color " color"
+Sets the background fill color for \fBpad\fR mode (e.g. \fBtransparent\fR, \fB#ffffff\fR). Defaults to \fBtransparent\fR. Overrides \fBmanifest.json\fR.
 .TP
 .BI \-\-agent ", " \-\-ssh\-agent
 Signs via OpenSSH Agent callback (Bitwarden Desktop \fB[Authorize]\fR GUI prompt). The raw private key never leaves the Bitwarden process (0 bytes in Python memory, 0 bytes on disk).
