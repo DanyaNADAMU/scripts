@@ -2347,7 +2347,8 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         f'  "version": "{version}",',
         "",
         '  // Aspect Ratio & Master Dimensions:',
-        '  // Options: "auto" (detected on build), "1:1", "16:9", "16:10", "4:3", "21:9", "9:16", "3:4", or "WxH"',
+        '  // Auto-detected on build from raster image or vector SVG viewBox.',
+        '  // Options: "auto", "1:1", "16:9", "16:10", "4:3", "21:9", "9:16", "3:4", or "WxH"',
         f'  "aspect_ratio": "{aspect_ratio}",',
     ]
 
@@ -2357,14 +2358,16 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
     lines.extend([
         "",
         '  // Favicon Generation:',
-        '  // When true, generates multi-resolution generated/favicon.ico (16, 32, 48, 64, 128, 256 layers)',
+        '  // When true, generates multi-resolution generated/favicon.ico (16, 32, 48, 64, 128, 256 layers).',
+        '  // For vector SVG masters, layers are rasterized directly from vector for maximum clarity.',
         f'  "generate_favicon": {gen_favicon_str},',
         "",
         '  // Distribution Formats (rendered into generated/):',
-        '  // Supported: ["webp", "png", "svg"]',
+        '  // Supported: ["webp", "png", "svg"] ("svg" is exported when master is vector SVG)',
         f'  "formats": [{formats_str}],',
         "",
         '  // Distribution Resolutions (rendered into generated/):',
+        '  // For raster masters: resized with Lanczos filter. For vector SVG: rasterized at native sharpness.',
         '  // Supports objects {"width": 512, "height": 512, "label": "512"}, numbers [512, 256], or strings ["1920x1080"]',
     ])
 
@@ -2379,7 +2382,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         "",
         '  // Additional Scaled Releases (C2PA + DWT + OTS signatures in signed/):',
         '  // When enabled, renders master into specified sizes and applies all cryptographic signatures.',
-        '  // Note: Master image and any extra files in to_sign/ are always signed into signed/.',
+        '  // Note: Master clone (raster or SVG) and extra to_sign/ files are always signed into signed/.',
         '  // Leave sizes empty [] if only master clone and extra to_sign/ files should be signed.',
         '  "signed": {',
         f'    "enabled": {signed_enabled_str},',
@@ -2387,6 +2390,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         '  },',
         "",
         '  // Optional C2PA Content Credentials metadata overrides:',
+        '  // Embedded into raster images (PNG/WebP/JPG) and vector SVG XML metadata.',
         '  // Leave empty strings "" to use global defaults from ~/.config/nadamu/c2pa.json',
         '  "metadata": {',
         f'    "author": "{meta_author}",',
@@ -2396,6 +2400,7 @@ def render_manifest_json(manifest: dict[str, Any]) -> str:
         '  },',
         "",
         '  // Optional Invisible DWT-DCT Steganography overrides:',
+        '  // Applied to raster releases; vector SVGs are secured via C2PA cryptographic assertion + Bitcoin OTS.',
         '  // Leave empty string "" to use global default from ~/.config/nadamu/c2pa.json ("NADAMU")',
         '  "watermark": {',
         f'    "text": "{wm_text}"',
@@ -2444,6 +2449,8 @@ def load_or_resolve_manifest(
     if not manifest:
         if master_w > 0 and master_h > 0:
             manifest = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
+            if master_path and master_path.suffix.lower() == ".svg" and "svg" not in manifest["formats"]:
+                manifest["formats"].append("svg")
             save_path = target_dir / "manifest.json"
             try:
                 save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2485,6 +2492,9 @@ def load_or_resolve_manifest(
             auto_m = detect_aspect_ratio_and_targets(master_w, master_h, name=name, version=version)
             manifest["aspect_ratio"] = auto_m["aspect_ratio"]
             manifest["master_dimensions"] = auto_m["master_dimensions"]
+            if master_path and master_path.suffix.lower() == ".svg":
+                if "svg" not in manifest.get("formats", []):
+                    manifest.setdefault("formats", []).append("svg")
             if auto_m["aspect_ratio"] != "1:1" and (not manifest.get("targets") or manifest.get("targets") == [
                 {"width": 512, "height": 512, "label": "512"},
                 {"width": 256, "height": 256, "label": "256"},
