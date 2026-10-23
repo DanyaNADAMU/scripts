@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily update timer for nada.mu personal utilities
+Documentation=https://github.com/DanyaNADAMU/scripts
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

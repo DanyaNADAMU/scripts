@@ -15,8 +15,8 @@ Synchronizes and updates all utilities with the repository. Verifies SHA-256 dig
 .B list
 Lists all utilities declared in the manifest, showing their installation status and paths.
 .TP
-.B autoupdate \fR[\fIstatus\fR|\fIenable\fR|\fIdisable\fR]
-Manage automated updates via package manager hooks. On Debian-based distributions with APT, configures \fB/etc/apt/apt.conf.d/99scripts\fR to automatically update utilities during \fBapt update\fR and \fBapt upgrade\fR.
+.B autoupdate \fR[\fIstatus\fR|\fIenable\fR|\fIdisable\fR] [\fItarget\fR]
+Manage automated updates across multiple mechanisms: systemd timers (user and system scope), interactive shell startup hooks (~/.bashrc, ~/.zshrc), cron jobs (crontab, /etc/cron.daily), APT hooks (/etc/apt/apt.conf.d/99scripts), and git post-merge hooks. Supported targets: \fBsystemd\fR, \fBshell\fR, \fBcron\fR, \fBapt\fR, \fBgit\fR, \fBall\fR.
 .TP
 .B prune
 Scans for and removes deprecated or orphaned utilities, man pages, and shell completions. (Alias: \fBclean\fR).

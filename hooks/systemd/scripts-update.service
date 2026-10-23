@@ -1,0 +1,11 @@
+[Unit]
+Description=Automated update for nada.mu personal utilities
+Documentation=https://github.com/DanyaNADAMU/scripts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/scripts update -y
+StandardOutput=journal
+StandardError=journal

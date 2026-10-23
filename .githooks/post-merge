@@ -1,0 +1,9 @@
+#!/bin/sh
+# ==============================================================================
+# Git Hook: post-merge
+# Description: Automatically updates symlinks and utilities after 'git pull'.
+# ==============================================================================
+if [ -x "./scripts" ]; then
+    echo "--> [git hook] Updating nada.mu utilities in background..."
+    ( ./scripts update --no-pull >/dev/null 2>&1 & )
+fi

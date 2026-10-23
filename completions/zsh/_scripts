@@ -34,7 +34,8 @@ _scripts() {
                 autoupdate)
                     _arguments \
                         '1:action:(status enable disable)' \
-                        '2:target:(apt)'
+                        '2:target:(systemd shell cron apt git all)' \
+                        '--scope[Target scope]:scope:(user system)'
                     ;;
                 prune|clean)
                     _arguments \

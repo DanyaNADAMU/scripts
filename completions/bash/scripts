@@ -16,7 +16,7 @@ _scripts_completions() {
             return 0
             ;;
         enable|disable)
-            COMPREPLY=( $(compgen -W "apt" -- "$cur") )
+            COMPREPLY=( $(compgen -W "systemd shell cron apt git all --scope" -- "$cur") )
             return 0
             ;;
         --scope)

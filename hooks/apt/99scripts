@@ -1,7 +1,6 @@
 // =============================================================================
 // APT Hook: 99scripts
-// Description: Automated update hook for nada.mu personal utilities ecosystem.
-// Triggers on: 'apt update' and 'apt upgrade' (rate-limited to once per 5 mins).
+// Description: Background update hook for nada.mu personal utilities.
+// Triggers on: 'apt update' (rate-limited to 24h, non-blocking & silent).
 // =============================================================================
-APT::Update::Post-Invoke { "if [ -x /usr/local/bin/scripts ]; then /usr/local/bin/scripts autoupdate apt || true; fi"; };
-DPkg::Post-Invoke { "if [ -x /usr/local/bin/scripts ]; then /usr/local/bin/scripts autoupdate apt || true; fi"; };
+APT::Update::Post-Invoke { "if [ -x /usr/local/bin/scripts ]; then ( /usr/local/bin/scripts autoupdate apt >/dev/null 2>&1 & ); fi"; };
