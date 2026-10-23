@@ -554,6 +554,8 @@ def load_config() -> dict[str, Any]:
         "watermark_text": DEFAULT_WATERMARK,
         "watermark_delta": 60.0,
         "watermark_repeats": 5,
+        "ssh_key_name": "c2pa-signer",
+        "watermark_key_name": "watermark-signer",
         "auto_stamp": False,
         "bitwarden_item": None,
         "tsa_url": DEFAULT_TSA_URL,
@@ -571,9 +573,13 @@ def load_config() -> dict[str, Any]:
                 user_cfg["watermark_repeats"] = 5
                 needs_save = True
             # Automatic purge: if in ssh-agent mode, remove plaintext watermark_secret from disk
-            if (user_cfg.get("signing_mode") or default_cfg.get("signing_mode")) == "ssh-agent" and "watermark_secret" in user_cfg:
-                user_cfg.pop("watermark_secret", None)
-                needs_save = True
+            if (user_cfg.get("signing_mode") or default_cfg.get("signing_mode")) == "ssh-agent":
+                if "watermark_secret" in user_cfg:
+                    user_cfg.pop("watermark_secret", None)
+                    needs_save = True
+                if "watermark_key_name" not in user_cfg:
+                    user_cfg["watermark_key_name"] = "watermark-signer"
+                    needs_save = True
             if needs_save:
                 DEFAULT_CONFIG_FILE.write_text(
                     json.dumps(user_cfg, indent=2) + "\n", encoding="utf-8"
@@ -624,7 +630,7 @@ def get_default_secret() -> str:
     cfg = load_config()
     if cfg.get("signing_mode") == "ssh-agent":
         try:
-            derived = derive_watermark_secret_from_ssh_agent(key_name=cfg.get("ssh_key_name"))
+            derived = derive_watermark_secret_from_ssh_agent(key_name=cfg.get("watermark_key_name"))
             if derived:
                 return derived
         except Exception:
@@ -1447,23 +1453,34 @@ def derive_watermark_secret_from_ssh_agent(
             return None
 
         cfg = load_config()
-        target_name = key_name or cfg.get("ssh_key_name") or "c2pa-signer"
+        target_name = key_name or cfg.get("watermark_key_name") or "watermark-signer"
+        fallback_name = cfg.get("ssh_key_name") or "c2pa-signer"
 
         target_blob = None
         target_type = None
         target_comment = None
+        is_fallback = False
 
-        # 1. Match by name / comment
+        # 1. Match by specified watermark key name / comment
         for k_blob, k_type, comm in keys:
             if target_name.lower() in (comm or "").lower():
                 target_blob, target_type, target_comment = k_blob, k_type, comm
                 break
 
-        # 2. Match by ed25519 or ecdsa
+        # 2. If dedicated key not found and caller didn't explicitly force key_name, fallback to C2PA key
+        if not target_blob and not key_name and fallback_name.lower() != target_name.lower():
+            for k_blob, k_type, comm in keys:
+                if fallback_name.lower() in (comm or "").lower():
+                    target_blob, target_type, target_comment = k_blob, k_type, comm
+                    is_fallback = True
+                    break
+
+        # 3. Match by ed25519 or ecdsa as general fallback
         if not target_blob:
             for k_blob, k_type, comm in keys:
                 if "ed25519" in k_type.lower() or "ecdsa" in k_type.lower():
                     target_blob, target_type, target_comment = k_blob, k_type, comm
+                    is_fallback = True
                     break
 
         if not target_blob:
@@ -1472,7 +1489,10 @@ def derive_watermark_secret_from_ssh_agent(
         if "ecdsa" in target_type.lower():
             log_warn(f"SSH key '{target_comment}' is ECDSA. Ed25519 is strongly recommended for deterministic watermark derivation across all SSH agents.")
 
-        log_info(f"Deriving watermark secret via SSH Agent key '{target_comment}'...")
+        if is_fallback:
+            log_info(f"Dedicated watermark key '{target_name}' not listed in agent; falling back to '{target_comment}'...")
+        else:
+            log_info(f"Deriving watermark secret via dedicated SSH Agent key '{target_comment}'...")
         sig = ssh_agent_sign(sock, target_blob, target_type, challenge)
         derived = hashlib.sha256(sig).hexdigest()
         log_ok(f"Derived deterministic watermark secret from SSH Agent ({target_comment}: {derived[:12]}...).")
@@ -1485,6 +1505,7 @@ def derive_watermark_secret_from_ssh_agent(
 def keys_gen_ssh_agent(
     domain: str = DEFAULT_DOMAIN,
     key_name: str = "c2pa-signer",
+    wm_key_name: str | None = "watermark-signer",
     sock_path: Path | None = None,
 ) -> None:
     """Binds C2PA certificates to an existing SSH Key (e.g. Bitwarden Desktop SSH Agent).
@@ -1548,6 +1569,7 @@ def keys_gen_ssh_agent(
     cfg = load_config()
     cfg["signing_mode"] = "ssh-agent"
     cfg["ssh_key_name"] = target_comment
+    cfg["watermark_key_name"] = wm_key_name or cfg.get("watermark_key_name") or "watermark-signer"
     cfg["ssh_agent_sock"] = str(sock)
     cfg.pop("watermark_secret", None)
     cfg["domain"] = domain
@@ -1559,23 +1581,27 @@ def keys_gen_ssh_agent(
 
     # Verify deterministic watermark secret derivation
     try:
-        derived_wm = derive_watermark_secret_from_ssh_agent(sock_path=sock, key_name=target_comment)
+        derived_wm = derive_watermark_secret_from_ssh_agent(sock_path=sock, key_name=cfg.get("watermark_key_name"))
         if derived_wm:
             log_ok(f"Verified deterministic watermark secret derivation ({derived_wm[:12]}...).")
     except Exception as e:
         log_warn(f"Watermark secret derivation test warning: {e}")
 
     print(f"\n  {C_BOLD}{C_GREEN}Zero-Knowledge SSH Agent Signing Active!{C_RESET}")
-    print(f"  • Private key storage:     {C_CYAN}Bitwarden Desktop Vault (Protected){C_RESET}")
-    print(f"  • Private key on disk:     {C_GREEN}0 bytes{C_RESET}")
-    print(f"  • Private key in RAM:      {C_GREEN}0 bytes (Agent callback protocol){C_RESET}")
+    print(f"  • C2PA signing key:        {C_CYAN}{target_comment}{C_RESET} in Bitwarden Desktop")
+    print(f"  • Watermark secret key:    {C_CYAN}{cfg.get('watermark_key_name')}{C_RESET} in Bitwarden Desktop")
+    print(f"  • Private keys on disk:    {C_GREEN}0 bytes{C_RESET}")
+    print(f"  • Private keys in RAM:     {C_GREEN}0 bytes (Agent callback protocol){C_RESET}")
     print(f"  • Signature confirmation:  {C_CYAN}Bitwarden Desktop [Authorize] GUI prompt{C_RESET}")
     print(f"  • Watermark secret:        {C_GREEN}0 bytes on disk (Derived on-the-fly via SSH Agent){C_RESET}\n")
     print(f"  {C_BOLD}Bitwarden Vault Recommendation:{C_RESET}")
-    print(f"  Open Bitwarden Desktop -> edit SSH Key entry '{target_comment}':")
-    print(f"    1. Add custom text field:   {C_BOLD}cert{C_RESET}             (Paste contents of {DEFAULT_CERT_PATH})")
-    print(f"    2. Add custom hidden field: {C_BOLD}root_key{C_RESET}         (Root CA disaster recovery backup below)")
-    print(f"    • Watermark secret:         {C_GREEN}No field needed (Derived on-the-fly via SSH Agent){C_RESET}")
+    print(f"  In Bitwarden Desktop:")
+    print(f"    1. SSH Key item '{target_comment}' (for C2PA signing):")
+    print(f"       • Custom text field:   {C_BOLD}cert{C_RESET}     (Paste contents of {DEFAULT_CERT_PATH})")
+    print(f"       • Custom hidden field: {C_BOLD}root_key{C_RESET} (Root CA disaster recovery backup below)")
+    print(f"    2. Separate SSH Key item '{cfg.get('watermark_key_name')}' (for DWT-DCT watermark):")
+    print(f"       • Dedicated Ed25519 key in Bitwarden used to derive invisible watermark secret")
+    print(f"       • (If omitted, media automatically falls back to '{target_comment}')\n")
     print(f"\n{C_YELLOW}--- BEGIN ROOT CA PRIVATE KEY BACKUP ---{C_RESET}")
     print(root_key_pem.decode("utf-8").strip())
     print(f"{C_YELLOW}--- END ROOT CA PRIVATE KEY BACKUP ---{C_RESET}\n")
@@ -2130,6 +2156,7 @@ def process_signing(
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
+    agent_wm_key_name: str | None = None,
     signer: c2pa.Signer | None = None,
     tsa_url: str | None = None,
 ) -> None:
@@ -2202,7 +2229,7 @@ def process_signing(
     # Derive watermark permutation secret from key bytes or configuration
     wm_secret = secret
     if not wm_secret and is_agent_mode:
-        k_target = agent_key_name or cfg.get("ssh_key_name")
+        k_target = agent_wm_key_name or cfg.get("watermark_key_name")
         wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
     if not wm_secret:
         if key_bytes:
@@ -2410,6 +2437,7 @@ def inspect_image(
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
+    agent_wm_key_name: str | None = None,
 ) -> None:
     """Verifies C2PA Content Credentials, DWT-DCT invisible watermarks, and OpenTimestamps."""
     if not image_path.is_file():
@@ -2441,7 +2469,7 @@ def inspect_image(
     cfg = load_config()
     wm_secret = secret
     if not wm_secret and (use_agent or cfg.get("signing_mode") == "ssh-agent"):
-        k_target = agent_key_name or cfg.get("ssh_key_name")
+        k_target = agent_wm_key_name or agent_key_name or cfg.get("watermark_key_name")
         wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
     if not wm_secret:
         env_creds = load_env_credentials()
@@ -3518,6 +3546,7 @@ def execute_build(
     bw_item: str | None = None,
     use_agent: bool = False,
     agent_key_name: str | None = None,
+    agent_wm_key_name: str | None = None,
     no_sign: bool = False,
     no_stamp: bool = False,
     force: bool = False,
@@ -4131,8 +4160,8 @@ def execute_build(
 
         # 1. Derive watermark permutation secret once for entire build
         if is_agent_mode:
-            k_target = agent_key_name or cfg.get("ssh_key_name")
-            batch_wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_target)
+            k_wm_target = agent_wm_key_name or cfg.get("watermark_key_name")
+            batch_wm_secret = derive_watermark_secret_from_ssh_agent(key_name=k_wm_target)
         elif bw_item or cfg.get("bitwarden_item"):
             target_bw = bw_item or cfg.get("bitwarden_item")
             try:
@@ -4217,6 +4246,7 @@ def execute_build(
                 bw_item=bw_item,
                 use_agent=use_agent,
                 agent_key_name=agent_key_name,
+                agent_wm_key_name=agent_wm_key_name,
                 signer=batch_signer,
                 secret=batch_wm_secret,
                 tsa_url=tsa_url,
@@ -4477,21 +4507,30 @@ def keys_show(bw_item: str | None = None) -> None:
 
     if mode == "ssh-agent":
         key_name = cfg.get("ssh_key_name", "c2pa-signer")
+        wm_key_name = cfg.get("watermark_key_name", "watermark-signer")
         sock = find_ssh_agent_socket()
         print(f"  {C_BOLD}Signing Mode:{C_RESET}     SSH Agent (Zero-Knowledge / RAM-Safe)")
         print(f"  {C_BOLD}Security Enclave:{C_RESET} Bitwarden Desktop (GUI Prompt [Authorize])")
         print(f"  {C_BOLD}Config File:{C_RESET}      {DEFAULT_CONFIG_FILE}")
         print(f"  {C_BOLD}Agent Socket:{C_RESET}     {sock if sock else C_RED + 'Not found' + C_RESET}")
-        print(f"  {C_BOLD}SSH Key Name:{C_RESET}     {key_name}")
+        print(f"  {C_BOLD}C2PA Key Name:{C_RESET}    {key_name}")
+        print(f"  {C_BOLD}Watermark Key:{C_RESET}    {wm_key_name}")
 
         if sock and sock.exists():
             try:
                 keys = ssh_agent_list_keys(sock)
-                matched = [comm for _, _, comm in keys if key_name.lower() in (comm or "").lower()]
-                if matched:
-                    print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_GREEN}Active (Key '{matched[0]}' loaded){C_RESET}")
+                matched_c2pa = [comm for _, _, comm in keys if key_name.lower() in (comm or "").lower()]
+                matched_wm = [comm for _, _, comm in keys if wm_key_name.lower() in (comm or "").lower()]
+                if matched_c2pa:
+                    print(f"  {C_BOLD}C2PA Key Status:{C_RESET}  {C_GREEN}Active (Key '{matched_c2pa[0]}' loaded){C_RESET}")
                 else:
-                    print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_YELLOW}Connected, but key '{key_name}' not listed{C_RESET}")
+                    print(f"  {C_BOLD}C2PA Key Status:{C_RESET}  {C_YELLOW}Connected, but key '{key_name}' not listed{C_RESET}")
+                if matched_wm:
+                    print(f"  {C_BOLD}WM Key Status:{C_RESET}    {C_GREEN}Active (Dedicated key '{matched_wm[0]}' loaded){C_RESET}")
+                elif matched_c2pa:
+                    print(f"  {C_BOLD}WM Key Status:{C_RESET}    {C_YELLOW}Not listed in agent; falling back to '{matched_c2pa[0]}'{C_RESET}")
+                else:
+                    print(f"  {C_BOLD}WM Key Status:{C_RESET}    {C_RED}Neither dedicated '{wm_key_name}' nor C2PA key found{C_RESET}")
             except Exception as e:
                 print(f"  {C_BOLD}Agent Status:{C_RESET}     {C_RED}Communication error: {e}{C_RESET}")
         else:
@@ -4500,9 +4539,9 @@ def keys_show(bw_item: str | None = None) -> None:
         print(f"  {C_BOLD}Cert File:{C_RESET}        {DEFAULT_CERT_PATH} ({'Found' if DEFAULT_CERT_PATH.is_file() else 'Missing'})")
         wm_sec = cfg.get("watermark_secret")
         if wm_sec:
-            print(f"  {C_BOLD}Watermark Key:{C_RESET}    {C_YELLOW}Explicitly configured in c2pa.json{C_RESET}")
+            print(f"  {C_BOLD}Watermark Secret:{C_RESET} {C_YELLOW}Explicitly configured in c2pa.json{C_RESET}")
         else:
-            print(f"  {C_BOLD}Watermark Key:{C_RESET}    {C_GREEN}Derived on-the-fly via SSH Agent (Zero-Disk / Ed25519){C_RESET}")
+            print(f"  {C_BOLD}Watermark Secret:{C_RESET} {C_GREEN}Derived on-the-fly via SSH Agent (Zero-Disk / Ed25519){C_RESET}")
         print(f"  {C_BOLD}Private Key RAM:{C_RESET}  {C_GREEN}0 bytes (Never leaves Bitwarden process){C_RESET}")
         print(f"  {C_BOLD}Private Key Disk:{C_RESET} {C_GREEN}0 bytes (Never written to filesystem){C_RESET}\n")
         return
@@ -4705,10 +4744,11 @@ def keys_gen(
     out_dir: Path | None = None,
     use_agent: bool = False,
     key_name: str = "c2pa-signer",
+    wm_key_name: str | None = "watermark-signer",
 ) -> None:
     """Generates new Root CA + Leaf C2PA credentials."""
     if use_agent:
-        keys_gen_ssh_agent(domain=domain, key_name=key_name)
+        keys_gen_ssh_agent(domain=domain, key_name=key_name, wm_key_name=wm_key_name)
         return
 
     if bw_item:
@@ -4777,7 +4817,8 @@ def keys_use(item_name: str | None = None) -> None:
         cfg.pop("watermark_secret", None)
         save_config(cfg)
         key_name = cfg.get("ssh_key_name", "c2pa-signer")
-        log_ok(f"Configured SSH Agent ('{key_name}') as default signing source in {DEFAULT_CONFIG_FILE}.")
+        wm_key_name = cfg.get("watermark_key_name", "watermark-signer")
+        log_ok(f"Configured SSH Agent (C2PA: '{key_name}', WM: '{wm_key_name}') as default signing source in {DEFAULT_CONFIG_FILE}.")
         return
 
     # Verify we can fetch the item
@@ -4856,7 +4897,8 @@ Automation & Keys Examples:
         help="Padding background color for 'pad' mode (e.g. 'transparent', '#ffffff')",
     )
     p_build.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
-    p_build.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
+    p_build.add_argument("--key-name", "--c2pa-key", dest="key_name", type=str, default=None, help="SSH key comment / identifier in agent for C2PA (default: 'c2pa-signer')")
+    p_build.add_argument("--wm-key", "--wm-key-name", "--watermark-key", dest="wm_key_name", type=str, default=None, help="SSH key comment / identifier in agent for watermark (default: 'watermark-signer')")
     p_build.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Bitwarden item name for C2PA keys")
     p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA & watermark signing (produce unsigned releases)")
     p_build.add_argument("--no-stamp", action="store_true", help="Skip OpenTimestamps Bitcoin anchoring")
@@ -4905,7 +4947,8 @@ Automation & Keys Examples:
     p_sign.add_argument("--stamp", action="store_true", help="Anchor signed file in Bitcoin blockchain via OpenTimestamps")
     p_sign.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark permutation")
     p_sign.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Sign via SSH Agent (Bitwarden Authorize prompt, zero keys in RAM)")
-    p_sign.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
+    p_sign.add_argument("--key-name", "--c2pa-key", dest="key_name", type=str, default=None, help="SSH key comment / identifier in agent for C2PA (default: 'c2pa-signer')")
+    p_sign.add_argument("--wm-key", "--wm-key-name", "--watermark-key", dest="wm_key_name", type=str, default=None, help="SSH key comment / identifier in agent for watermark (default: 'watermark-signer')")
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
     p_sign.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch C2PA credentials strictly from Bitwarden into RAM")
@@ -4917,7 +4960,8 @@ Automation & Keys Examples:
     p_verify.add_argument("--ots", type=Path, help="Path to custom or detached .ots proof file")
     p_verify.add_argument("-s", "--secret", type=str, help="Secret passphrase for watermark extraction")
     p_verify.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Derive watermark secret via SSH Agent (Bitwarden)")
-    p_verify.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
+    p_verify.add_argument("--key-name", type=str, default=None, help="SSH key comment / identifier in agent (default: 'watermark-signer')")
+    p_verify.add_argument("--wm-key", "--wm-key-name", "--watermark-key", dest="wm_key_name", type=str, default=None, help="SSH key comment / identifier in agent for watermark (default: 'watermark-signer')")
     p_verify.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch watermark secret from Bitwarden into RAM")
     p_verify.add_argument("--json", action="store_true", help="Output raw verification report in JSON")
 
@@ -4945,7 +4989,8 @@ Automation & Keys Examples:
     p_k_gen.add_argument("-d", "--domain", type=str, default=DEFAULT_DOMAIN, help="Domain for certificates")
     p_k_gen.add_argument("--out-dir", type=Path, default=DEFAULT_KEY_DIR, help="Destination directory for keys")
     p_k_gen.add_argument("--agent", "--ssh-agent", dest="agent", action="store_true", help="Bind C2PA certificates to SSH Agent key (Bitwarden, zero keys on disk/RAM)")
-    p_k_gen.add_argument("--key-name", type=str, default="c2pa-signer", help="SSH key comment / identifier in agent (default: 'c2pa-signer')")
+    p_k_gen.add_argument("--key-name", "--c2pa-key", dest="key_name", type=str, default="c2pa-signer", help="SSH key comment / identifier in agent for C2PA (default: 'c2pa-signer')")
+    p_k_gen.add_argument("--wm-key", "--wm-key-name", "--watermark-key", dest="wm_key_name", type=str, default="watermark-signer", help="SSH key comment / identifier in agent for watermark (default: 'watermark-signer')")
     p_k_gen.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Store credentials directly in Bitwarden vault (0 disk files)")
     p_k_exp = sub_keys.add_parser("export", help="Export private key and cert in PEM format")
     p_k_exp.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Export from Bitwarden vault")
@@ -5004,6 +5049,7 @@ Automation & Keys Examples:
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),
+            agent_wm_key_name=getattr(args, "wm_key_name", None),
             no_sign=args.no_sign,
             no_stamp=args.no_stamp,
             force=args.force,
@@ -5094,6 +5140,7 @@ Automation & Keys Examples:
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),
+            agent_wm_key_name=getattr(args, "wm_key_name", None),
             tsa_url=getattr(args, "tsa", None),
         )
 
@@ -5107,6 +5154,7 @@ Automation & Keys Examples:
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),
+            agent_wm_key_name=getattr(args, "wm_key_name", None),
         )
 
     # Dispatch: stamp
@@ -5135,6 +5183,7 @@ Automation & Keys Examples:
                 out_dir=args.out_dir,
                 use_agent=getattr(args, "agent", False),
                 key_name=getattr(args, "key_name", "c2pa-signer"),
+                wm_key_name=getattr(args, "wm_key_name", "watermark-signer"),
             )
         elif action == "export":
             keys_export(bw_item=args.bw_item, pubkey_only=getattr(args, "pubkey", False))
