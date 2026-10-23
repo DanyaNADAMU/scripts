@@ -2170,10 +2170,16 @@ def process_signing(
         try:
             bak_dir = output_path.parent / ".backup"
             bak_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(output_path, bak_dir / output_path.name)
+            bak_file = bak_dir / output_path.name
+            if bak_file.is_file():
+                bak_file.unlink()
+            shutil.copy2(output_path, bak_file)
             local_ots = output_path.with_name(f"{output_path.name}.ots")
             if local_ots.is_file():
-                shutil.copy2(local_ots, bak_dir / local_ots.name)
+                bak_ots = bak_dir / local_ots.name
+                if bak_ots.is_file():
+                    bak_ots.unlink()
+                shutil.copy2(local_ots, bak_ots)
         except Exception:
             pass
 
@@ -4219,16 +4225,25 @@ def execute_build(
                 try:
                     bak_dir = dst_file.parent / ".backup"
                     bak_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(dst_file, bak_dir / dst_file.name)
+                    bak_file = bak_dir / dst_file.name
+                    if bak_file.is_file():
+                        bak_file.unlink()
+                    shutil.copy2(dst_file, bak_file)
                     local_ots = dst_file.with_name(f"{dst_file.name}.ots")
                     if local_ots.is_file():
-                        shutil.copy2(local_ots, bak_dir / local_ots.name)
+                        bak_ots = bak_dir / local_ots.name
+                        if bak_ots.is_file():
+                            bak_ots.unlink()
+                        shutil.copy2(local_ots, bak_ots)
                     if target_proofs_dir:
                         r_proof_dir = target_proofs_dir / "signed" / ".backup"
                         r_proof_dir.mkdir(parents=True, exist_ok=True)
                         rem_ots = target_proofs_dir / "signed" / f"{dst_file.name}.ots"
                         if rem_ots.is_file():
-                            shutil.copy2(rem_ots, r_proof_dir / rem_ots.name)
+                            r_bak_ots = r_proof_dir / rem_ots.name
+                            if r_bak_ots.is_file():
+                                r_bak_ots.unlink()
+                            shutil.copy2(rem_ots, r_bak_ots)
                     log_info(f"Preserved historical archive of {dst_file.name} & .ots in .backup/ before re-signing.")
                 except Exception as e:
                     log_warn(f"Failed to create historical backup for {dst_file.name}: {e}")
