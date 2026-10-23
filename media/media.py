@@ -84,6 +84,7 @@ DEFAULT_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCre
 DEFAULT_WATERMARK = "NADAMU"
 DEFAULT_BW_ITEM = "c2pa-signer"
 DEFAULT_WATERMARK_CHALLENGE = b"c2pa:watermark:seed:v1:nada.mu"
+DEFAULT_TSA_URL = "http://timestamp.digicert.com"
 
 # ANSI Colors
 C_BLUE = "\033[1;34m"
@@ -555,6 +556,7 @@ def load_config() -> dict[str, Any]:
         "watermark_repeats": 3,
         "auto_stamp": False,
         "bitwarden_item": None,
+        "tsa_url": DEFAULT_TSA_URL,
     }
 
     if DEFAULT_CONFIG_FILE.is_file():
@@ -589,6 +591,18 @@ def save_config(cfg: dict[str, Any]) -> None:
         DEFAULT_CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     except Exception as e:
         log_warn(f"Failed to save {DEFAULT_CONFIG_FILE}: {e}")
+
+
+def get_tsa_url(cli_override: str | None = None) -> str | None:
+    """Returns active RFC 3161 TSA URL, prioritizing CLI flag, then c2pa.json, defaulting to DigiCert."""
+    if cli_override is not None:
+        val = cli_override.strip()
+        return None if val.lower() in ("none", "null", "disable", "off", "false", "") else val
+    cfg = load_config()
+    val = cfg.get("tsa_url", DEFAULT_TSA_URL)
+    if not val or str(val).lower() in ("none", "null", "disable", "off", "false", ""):
+        return None
+    return str(val).strip()
 
 
 def get_default_secret() -> str:
@@ -1206,6 +1220,7 @@ def create_c2pa_session_signer_from_ssh_agent(
     key_comment: str | None = None,
     cert_chain_pem: bytes | None = None,
     domain: str = DEFAULT_DOMAIN,
+    tsa_url: str | None = None,
 ) -> c2pa.Signer:
     """Creates a c2pa.Signer backed by an ephemeral in-memory session key authorized once via SSH Agent.
 
@@ -1279,8 +1294,8 @@ def create_c2pa_session_signer_from_ssh_agent(
         .issuer_name(parent_cert.subject)
         .public_key(session_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(hours=1))
-        .not_valid_after(now + datetime.timedelta(hours=24))
+        .not_valid_before(now - datetime.timedelta(seconds=10))
+        .not_valid_after(now + datetime.timedelta(seconds=30))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -1333,7 +1348,7 @@ def create_c2pa_session_signer_from_ssh_agent(
         alg=c2pa.C2paSigningAlg.ES256,
         sign_cert=full_chain_pem,
         private_key=session_key_pem,
-        ta_url=None,
+        ta_url=get_tsa_url(tsa_url),
     )
     return c2pa.Signer.from_info(signer_info)
 
@@ -2102,11 +2117,24 @@ def process_signing(
     use_agent: bool = False,
     agent_key_name: str | None = None,
     signer: c2pa.Signer | None = None,
+    tsa_url: str | None = None,
 ) -> None:
     """Executes multi-layer signing (DWT-DCT steganography + C2PA Credentials + OpenTimestamps)."""
     if not input_path.is_file():
         log_err(f"Input file not found: {input_path}")
         sys.exit(1)
+
+    # Preserve historical backup of existing signed release & .ots proof before overwriting
+    if output_path.is_file() and output_path.resolve() != input_path.resolve():
+        try:
+            bak_dir = output_path.parent / ".backup"
+            bak_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(output_path, bak_dir / output_path.name)
+            local_ots = output_path.with_name(f"{output_path.name}.ots")
+            if local_ots.is_file():
+                shutil.copy2(local_ots, bak_dir / local_ots.name)
+        except Exception:
+            pass
 
     cfg = load_config()
 
@@ -2153,7 +2181,7 @@ def process_signing(
                 alg=c2pa.C2paSigningAlg.ES256,
                 sign_cert=cert_bytes,
                 private_key=key_bytes,
-                ta_url=None,
+                ta_url=get_tsa_url(tsa_url),
             )
             c2pa_signer = c2pa.Signer.from_info(signer_info)
 
@@ -2464,10 +2492,16 @@ def inspect_image(
         fmt = active.get("format", "Unknown")
         title = active.get("title", "Untitled")
 
+        val_display = c2pa_val_str
+        if c2pa_val_str == "Invalid" and ots_data and ots_data.get("status") == "confirmed":
+            blocks = ots_data.get("btc_blocks", [])
+            b_str = str(blocks[0]) if blocks else "Bitcoin blockchain"
+            val_display = f"{C_YELLOW}Clock Expired (Cryptographically attested at Bitcoin Block {b_str}){C_RESET}"
+
         print(f"    {C_GREEN}✓ Manifest Detected:{C_RESET} {title}")
         print(f"      Generator:  {claim_gen}")
         print(f"      Format:     {fmt}")
-        print(f"      Validation: {c2pa_val_str}")
+        print(f"      Validation: {val_display}")
 
         for assertion in active.get("assertions", []):
             label = assertion.get("label", "")
@@ -3473,6 +3507,7 @@ def execute_build(
     no_sign: bool = False,
     no_stamp: bool = False,
     force: bool = False,
+    tsa_url: str | None = None,
 ) -> None:
     """Executes atomic multi-scale build pipeline for an asset version."""
     icons_dir = base_dir or get_default_icons_dir()
@@ -4102,6 +4137,7 @@ def execute_build(
                 batch_signer = create_c2pa_session_signer_from_ssh_agent(
                     key_comment=k_target,
                     domain=manifest_domain or cfg.get("domain", DEFAULT_DOMAIN),
+                    tsa_url=tsa_url,
                 )
                 log_ok(f"Session signer active: single SSH authorization covers all {len(items_to_sign_pending)} release(s).")
             except Exception as e:
@@ -4114,7 +4150,7 @@ def execute_build(
                     alg=c2pa.C2paSigningAlg.ES256,
                     sign_cert=c_bytes,
                     private_key=k_bytes,
-                    ta_url=None,
+                    ta_url=get_tsa_url(tsa_url),
                 )
                 batch_signer = c2pa.Signer.from_info(signer_info)
             except Exception as e:
@@ -4127,7 +4163,7 @@ def execute_build(
                     alg=c2pa.C2paSigningAlg.ES256,
                     sign_cert=c_bytes,
                     private_key=k_bytes,
-                    ta_url=None,
+                    ta_url=get_tsa_url(tsa_url),
                 )
                 batch_signer = c2pa.Signer.from_info(signer_info)
             except Exception as e:
@@ -4135,6 +4171,25 @@ def execute_build(
 
     for src_file, dst_file, desc, is_tmp in items_to_sign_pending:
         if not no_sign:
+            # Preserve existing signed file and .ots proof as historical backup before overwriting
+            if dst_file.is_file():
+                try:
+                    bak_dir = dst_file.parent / ".backup"
+                    bak_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(dst_file, bak_dir / dst_file.name)
+                    local_ots = dst_file.with_name(f"{dst_file.name}.ots")
+                    if local_ots.is_file():
+                        shutil.copy2(local_ots, bak_dir / local_ots.name)
+                    if target_proofs_dir:
+                        r_proof_dir = target_proofs_dir / "signed" / ".backup"
+                        r_proof_dir.mkdir(parents=True, exist_ok=True)
+                        rem_ots = target_proofs_dir / "signed" / f"{dst_file.name}.ots"
+                        if rem_ots.is_file():
+                            shutil.copy2(rem_ots, r_proof_dir / rem_ots.name)
+                    log_info(f"Preserved historical archive of {dst_file.name} & .ots in .backup/ before re-signing.")
+                except Exception as e:
+                    log_warn(f"Failed to create historical backup for {dst_file.name}: {e}")
+
             log_info(f"Cryptographically signing {desc} -> {dst_file.name}...")
             process_signing(
                 input_path=src_file,
@@ -4150,6 +4205,7 @@ def execute_build(
                 agent_key_name=agent_key_name,
                 signer=batch_signer,
                 secret=batch_wm_secret,
+                tsa_url=tsa_url,
             )
             if is_tmp:
                 src_file.unlink(missing_ok=True)
@@ -4466,8 +4522,12 @@ def keys_show(bw_item: str | None = None) -> None:
     print(f"    3. rm -rf {DEFAULT_KEY_DIR}\n")
 
 
-def keys_export(bw_item: str | None = None) -> None:
+def keys_export(bw_item: str | None = None, pubkey_only: bool = False) -> None:
     """Exports raw PEM key and certificate to stdout for backup or Bitwarden."""
+    if pubkey_only:
+        keys_pubkey(format_type="pem", bw_item=bw_item)
+        return
+
     cfg = load_config()
     mode = cfg.get("signing_mode")
     if mode == "ssh-agent" and not bw_item:
@@ -4488,6 +4548,141 @@ def keys_export(bw_item: str | None = None) -> None:
     print(k_bytes.decode("utf-8").strip())
     print()
     print(c_bytes.decode("utf-8").strip())
+
+
+def keys_tsa(url: str | None = None, disable: bool = False) -> None:
+    """Views or updates the RFC 3161 Timestamp Authority (TSA) URL in c2pa.json."""
+    cfg = load_config()
+    if disable or (url and url.lower() in ("none", "off", "disable", "null", "false")):
+        cfg["tsa_url"] = None
+        save_config(cfg)
+        log_ok(f"RFC 3161 Timestamp Authority disabled in {DEFAULT_CONFIG_FILE}.")
+        return
+
+    if url:
+        cfg["tsa_url"] = url.strip()
+        save_config(cfg)
+        log_ok(f"Configured TSA URL: {url.strip()} in {DEFAULT_CONFIG_FILE}.")
+        return
+
+    current = cfg.get("tsa_url", DEFAULT_TSA_URL)
+    log_head("RFC 3161 Timestamp Authority (TSA) Status")
+    if current:
+        print(f"  {C_BOLD}Active TSA URL:{C_RESET} {C_GREEN}{current}{C_RESET}")
+        print(f"  {C_BOLD}Config Source:{C_RESET}  {'c2pa.json' if 'tsa_url' in cfg else 'Default (DigiCert)'}")
+        print(f"  {C_BOLD}Purpose:{C_RESET}        Embeds cryptographically verifiable RFC 3161 timestamp into C2PA signatures.")
+        print(f"                  Guarantees signatures remain Valid forever even after certificate expiration.\n")
+    else:
+        print(f"  {C_BOLD}Active TSA URL:{C_RESET} {C_YELLOW}Disabled (None){C_RESET}")
+        print(f"  {C_BOLD}Note:{C_RESET}           Signatures rely solely on local certificate validity window.\n")
+    print(f"  {C_CYAN}To change TSA URL:{C_RESET}      media keys tsa <url>")
+    print(f"  {C_CYAN}To reset to DigiCert:{C_RESET}   media keys tsa http://timestamp.digicert.com")
+    print(f"  {C_CYAN}To disable TSA:{C_RESET}         media keys tsa --disable\n")
+
+
+def keys_pubkey(
+    format_type: str | None = None,
+    bw_item: str | None = None,
+) -> None:
+    """Exports public key, certificate fingerprints, and Root CA trust anchor."""
+    cfg = load_config()
+    target_bw = bw_item or cfg.get("bitwarden_item") or os.environ.get("C2PA_BW_ITEM")
+
+    c_bytes = None
+    if DEFAULT_CERT_PATH.is_file():
+        c_bytes = DEFAULT_CERT_PATH.read_bytes()
+    elif target_bw:
+        try:
+            _, c_bytes = fetch_bitwarden_credentials(target_bw)
+        except Exception:
+            pass
+    elif cfg.get("c2pa_cert_pem"):
+        c_bytes = cfg["c2pa_cert_pem"].encode("utf-8")
+
+    if not c_bytes:
+        log_err(f"No C2PA public certificate chain found in {DEFAULT_CERT_PATH}.")
+        log_info(f"Initialize certificates first: {C_BOLD}media keys gen --agent{C_RESET}")
+        sys.exit(1)
+
+    try:
+        certs = x509.load_pem_x509_certificates(c_bytes)
+        if not certs:
+            raise ValueError("No certificates in chain")
+    except Exception as e:
+        log_err(f"Failed to parse X.509 certificate chain: {e}")
+        sys.exit(1)
+
+    leaf_cert = certs[0]
+    root_cert = certs[-1]
+    pub_key = leaf_cert.public_key()
+
+    pem_str = pub_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8").strip()
+
+    ssh_key_name = cfg.get("ssh_key_name", "c2pa-signer")
+    try:
+        ssh_str = pub_key.public_bytes(
+            serialization.Encoding.OpenSSH,
+            serialization.PublicFormat.OpenSSH,
+        ).decode("utf-8").strip() + f" {ssh_key_name}"
+    except Exception:
+        ssh_str = None
+
+    cert_fingerprint = leaf_cert.fingerprint(hashes.SHA256()).hex(":").upper()
+
+    pub_digest = hashes.Hash(hashes.SHA256())
+    pub_digest.update(
+        pub_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    pub_fingerprint = pub_digest.finalize().hex(":").upper()
+    root_pem = root_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8").strip()
+
+    # Raw single-format requests:
+    if format_type == "ssh":
+        if ssh_str:
+            print(ssh_str)
+        else:
+            log_err("Public key does not support OpenSSH wire format.")
+            sys.exit(1)
+        return
+    elif format_type == "pem":
+        print(pem_str)
+        return
+    elif format_type == "fingerprint":
+        print(f"sha256 Fingerprint={cert_fingerprint}")
+        return
+    elif format_type in ("root-ca", "ca", "root"):
+        print(root_pem)
+        return
+
+    # Default full overview:
+    log_head("C2PA Public Attestation & Verifier Identity")
+    author = cfg.get("author", DEFAULT_AUTHOR)
+    domain = cfg.get("domain", DEFAULT_DOMAIN)
+    print(f"  {C_BOLD}Author / Identity:{C_RESET}     {author}")
+    print(f"  {C_BOLD}Domain / Policy:{C_RESET}       https://{domain}/.well-known/security.txt")
+    print(f"  {C_BOLD}Signing Subject:{C_RESET}       {leaf_cert.subject.rfc4514_string()}")
+    print(f"  {C_BOLD}Root CA Issuer:{C_RESET}        {root_cert.subject.rfc4514_string()}")
+    print()
+
+    if ssh_str:
+        print(f"  {C_CYAN}--- OpenSSH Public Key (for .allowed_signers / GitHub / DNS) ---{C_RESET}")
+        print(f"{ssh_str}\n")
+
+    print(f"  {C_CYAN}--- SubjectPublicKeyInfo (X.509 PEM) ---{C_RESET}")
+    print(f"{pem_str}\n")
+
+    print(f"  {C_CYAN}--- Certificate SHA-256 Fingerprint (Thumbprint) ---{C_RESET}")
+    print(f"sha256 Fingerprint={cert_fingerprint}")
+    print(f"Public Key SHA-256={pub_fingerprint}\n")
+
+    print(f"  {C_CYAN}--- Root CA Certificate (Share with verifiers: 'c2patool --trust-anchors <file>') ---{C_RESET}")
+    print(f"{root_pem}\n")
 
 
 def keys_gen(
@@ -4652,6 +4847,7 @@ Automation & Keys Examples:
     p_build.add_argument("--no-sign", action="store_true", help="Skip C2PA & watermark signing (produce unsigned releases)")
     p_build.add_argument("--no-stamp", action="store_true", help="Skip OpenTimestamps Bitcoin anchoring")
     p_build.add_argument("--force", action="store_true", help="Bypass audit mismatch and re-stamp files")
+    p_build.add_argument("--tsa", type=str, default=None, help="RFC 3161 Timestamp Authority URL (override default or c2pa.json)")
 
     # Command: audit
     p_audit = subparsers.add_parser("audit", help="Run full non-blocking integrity audit across asset tree")
@@ -4699,6 +4895,7 @@ Automation & Keys Examples:
     p_sign.add_argument("--key", type=Path, help="Custom EC private key in PEM format")
     p_sign.add_argument("--cert", type=Path, help="Custom X.509 certificate chain in PEM format")
     p_sign.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Fetch C2PA credentials strictly from Bitwarden into RAM")
+    p_sign.add_argument("--tsa", type=str, default=None, help="RFC 3161 Timestamp Authority URL (override default or c2pa.json)")
 
     # Command: verify
     p_verify = subparsers.add_parser("verify", help="Inspect and verify C2PA, watermarks & OpenTimestamps")
@@ -4738,6 +4935,16 @@ Automation & Keys Examples:
     p_k_gen.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Store credentials directly in Bitwarden vault (0 disk files)")
     p_k_exp = sub_keys.add_parser("export", help="Export private key and cert in PEM format")
     p_k_exp.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Export from Bitwarden vault")
+    p_k_exp.add_argument("--pubkey", action="store_true", help="Export public key only instead of full credentials")
+    p_k_pub = sub_keys.add_parser("pubkey", help="Export public key, certificate fingerprint, and trust anchor for public verification")
+    p_k_pub.add_argument("--ssh", action="store_const", const="ssh", dest="format", help="Print OpenSSH public key string only")
+    p_k_pub.add_argument("--pem", action="store_const", const="pem", dest="format", help="Print X.509 SubjectPublicKeyInfo PEM only")
+    p_k_pub.add_argument("--fingerprint", action="store_const", const="fingerprint", dest="format", help="Print certificate SHA-256 fingerprint only")
+    p_k_pub.add_argument("--root-ca", "--ca", action="store_const", const="root-ca", dest="format", help="Print Root CA certificate PEM only (trust anchor)")
+    p_k_pub.add_argument("--bw", "--bw-item", dest="bw_item", nargs="?", const=DEFAULT_BW_ITEM, type=str, help="Inspect Bitwarden credentials")
+    p_k_tsa = sub_keys.add_parser("tsa", help="View or configure RFC 3161 Timestamp Authority (TSA) URL")
+    p_k_tsa.add_argument("url", type=str, nargs="?", default=None, help="New TSA URL (e.g. 'http://timestamp.digicert.com') or 'none'/'disable' to turn off")
+    p_k_tsa.add_argument("--disable", "--off", action="store_true", help="Disable TSA timestamping")
     p_k_push = sub_keys.add_parser("push", help="Push local keys to Bitwarden vault as Secure Note")
     p_k_push.add_argument("item", type=str, default=DEFAULT_BW_ITEM, nargs="?", help="Bitwarden item name")
     p_k_use = sub_keys.add_parser("use", help="Configure default signing source ('agent', Bitwarden item, or 'local')")
@@ -4786,6 +4993,7 @@ Automation & Keys Examples:
             no_sign=args.no_sign,
             no_stamp=args.no_stamp,
             force=args.force,
+            tsa_url=getattr(args, "tsa", None),
         )
 
     # Dispatch: audit
@@ -4872,6 +5080,7 @@ Automation & Keys Examples:
             bw_item=args.bw_item,
             use_agent=getattr(args, "agent", False),
             agent_key_name=getattr(args, "key_name", None),
+            tsa_url=getattr(args, "tsa", None),
         )
 
     # Dispatch: verify
@@ -4914,7 +5123,11 @@ Automation & Keys Examples:
                 key_name=getattr(args, "key_name", "c2pa-signer"),
             )
         elif action == "export":
-            keys_export(bw_item=args.bw_item)
+            keys_export(bw_item=args.bw_item, pubkey_only=getattr(args, "pubkey", False))
+        elif action == "pubkey":
+            keys_pubkey(format_type=getattr(args, "format", None), bw_item=getattr(args, "bw_item", None))
+        elif action == "tsa":
+            keys_tsa(url=getattr(args, "url", None), disable=getattr(args, "disable", False))
         elif action == "push":
             keys_push(item_name=args.item)
         elif action == "use":
