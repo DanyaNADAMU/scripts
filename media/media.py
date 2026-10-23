@@ -552,8 +552,8 @@ def load_config() -> dict[str, Any]:
         "default_license": f"All rights reserved. Verified at {DEFAULT_POLICY_URL}",
         "digital_source_type": DEFAULT_SOURCE_TYPE,
         "watermark_text": DEFAULT_WATERMARK,
-        "watermark_delta": 35.0,
-        "watermark_repeats": 3,
+        "watermark_delta": 60.0,
+        "watermark_repeats": 5,
         "auto_stamp": False,
         "bitwarden_item": None,
         "tsa_url": DEFAULT_TSA_URL,
@@ -562,13 +562,24 @@ def load_config() -> dict[str, Any]:
     if DEFAULT_CONFIG_FILE.is_file():
         try:
             user_cfg = json.loads(DEFAULT_CONFIG_FILE.read_text(encoding="utf-8"))
-            default_cfg.update(user_cfg)
+            needs_save = False
+            # Auto-upgrade legacy steganography defaults to robust parameters
+            if user_cfg.get("watermark_delta") == 35.0:
+                user_cfg["watermark_delta"] = 60.0
+                needs_save = True
+            if user_cfg.get("watermark_repeats") == 3:
+                user_cfg["watermark_repeats"] = 5
+                needs_save = True
             # Automatic purge: if in ssh-agent mode, remove plaintext watermark_secret from disk
-            if default_cfg.get("signing_mode") == "ssh-agent" and "watermark_secret" in user_cfg:
+            if (user_cfg.get("signing_mode") or default_cfg.get("signing_mode")) == "ssh-agent" and "watermark_secret" in user_cfg:
                 user_cfg.pop("watermark_secret", None)
+                needs_save = True
+            if needs_save:
                 DEFAULT_CONFIG_FILE.write_text(
                     json.dumps(user_cfg, indent=2) + "\n", encoding="utf-8"
                 )
+            default_cfg.update(user_cfg)
+            if default_cfg.get("signing_mode") == "ssh-agent":
                 default_cfg.pop("watermark_secret", None)
         except Exception as e:
             log_warn(f"Failed to parse {DEFAULT_CONFIG_FILE}: {e}")
@@ -689,10 +700,10 @@ def embed_dwt_watermark(
     img: Image.Image,
     text: str,
     secret: str,
-    delta: float = 35.0,
-    repeats: int = 3,
+    delta: float = 60.0,
+    repeats: int = 5,
 ) -> Image.Image:
-    """Embeds an invisible, robust DWT-DCT watermark into the luminance channel."""
+    """Embeds an invisible, robust DWT-DCT watermark into the luminance channel using mid-frequency coefficients."""
     has_alpha = img.mode == "RGBA"
     alpha = img.getchannel("A") if has_alpha else None
     orig_w, orig_h = img.size
@@ -726,6 +737,9 @@ def embed_dwt_watermark(
     indices = list(range(total_blocks))
     rng.shuffle(indices)
 
+    # Use robust mid-frequency DCT coefficients (3, 4) and (4, 3) with symmetric modulation
+    u, v = 3, 4
+    half_delta = delta / 2.0
     for i, bit in enumerate(expanded_bits):
         block_idx = indices[i]
         by = block_idx // blocks_w
@@ -733,13 +747,13 @@ def embed_dwt_watermark(
 
         block = LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8]
         d = _dct2(block)
-        c1, c2 = d[1, 2], d[2, 1]
+        avg = (d[u, v] + d[v, u]) / 2.0
         if bit == 1:
-            if c1 <= c2 + delta:
-                d[1, 2] = c2 + delta
+            d[u, v] = avg + half_delta
+            d[v, u] = avg - half_delta
         else:
-            if c2 <= c1 + delta:
-                d[2, 1] = c1 + delta
+            d[u, v] = avg - half_delta
+            d[v, u] = avg + half_delta
         LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8] = _idct2(d)
 
     y_wm = pywt.idwt2((LL, (LH, HL, HH)), "haar")
@@ -765,10 +779,13 @@ def embed_dwt_watermark(
 def extract_dwt_watermark(
     img: Image.Image,
     secret: str,
-    repeats: int = 3,
+    repeats: int = 5,
     max_payload_bytes: int = 64,
 ) -> str | None:
-    """Scans and extracts an invisible DWT-DCT watermark from image frequencies."""
+    """Scans and extracts an invisible DWT-DCT watermark from image frequencies.
+
+    Scans mid-frequency (3, 4) with fallback to legacy (1, 2) across multi-rate repetition chunks.
+    """
     rgb_img = img.convert("RGB")
     Y, _, _ = rgb_img.convert("YCbCr").split()
     y_arr = np.array(Y, dtype=np.float32)
@@ -778,46 +795,43 @@ def extract_dwt_watermark(
     blocks_h, blocks_w = h // 8, w // 8
     total_blocks = blocks_h * blocks_w
 
-    max_bits = (16 + max_payload_bytes) * 8 * repeats
-    num_to_read = min(max_bits, total_blocks)
+    # Try modern mid-frequency (3, 4) first, then fallback to legacy (1, 2)
+    for u, v in ((3, 4), (1, 2)):
+        effective_repeats = max(repeats, 1)
+        max_bits = (16 + max_payload_bytes) * 8 * max(effective_repeats, 7)
+        num_to_read = min(max_bits, total_blocks)
 
-    rng = random.Random(secret)
-    indices = list(range(total_blocks))
-    rng.shuffle(indices)
+        rng = random.Random(secret)
+        indices = list(range(total_blocks))
+        rng.shuffle(indices)
 
-    raw_bits: list[int] = []
-    for i in range(num_to_read):
-        block_idx = indices[i]
-        by = block_idx // blocks_w
-        bx = block_idx % blocks_w
-        block = LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8]
-        d = _dct2(block)
-        raw_bits.append(1 if d[1, 2] > d[2, 1] else 0)
+        raw_bits: list[int] = []
+        for i in range(num_to_read):
+            block_idx = indices[i]
+            by = block_idx // blocks_w
+            bx = block_idx % blocks_w
+            block = LL[by * 8 : (by + 1) * 8, bx * 8 : (bx + 1) * 8]
+            d = _dct2(block)
+            raw_bits.append(1 if d[u, v] > d[v, u] else 0)
 
-    # 1. Try specified repeat rate
-    if repeats > 1 and len(raw_bits) >= repeats:
-        voted_bits: list[int] = []
-        for i in range(0, len(raw_bits) - repeats + 1, repeats):
-            chunk = raw_bits[i : i + repeats]
-            voted_bits.append(1 if sum(chunk) > (repeats // 2) else 0)
-        parsed = _parse_watermark_packet(voted_bits)
-        if parsed:
-            return parsed
+        # Dynamic scan order: configured repeats first, then alternatives (5, 3, 7, 2, 4)
+        rates_to_try = [effective_repeats]
+        for r_cand in (5, 3, 7, 2, 4):
+            if r_cand not in rates_to_try:
+                rates_to_try.append(r_cand)
 
-    # 2. Try single-bit rate (repeats=1) fallback
-    parsed = _parse_watermark_packet(raw_bits)
-    if parsed:
-        return parsed
+        for r_test in rates_to_try:
+            if r_test > 1 and len(raw_bits) >= r_test:
+                voted_bits: list[int] = []
+                for i in range(0, len(raw_bits) - r_test + 1, r_test):
+                    chunk = raw_bits[i : i + r_test]
+                    voted_bits.append(1 if sum(chunk) > (r_test // 2) else 0)
+                parsed = _parse_watermark_packet(voted_bits)
+                if parsed:
+                    return parsed
 
-    # 3. Dynamic scan across lower repeat values (2, 3, 4)
-    for r_test in (3, 2, 4):
-        if r_test == repeats:
-            continue
-        v_bits: list[int] = []
-        for i in range(0, len(raw_bits) - r_test + 1, r_test):
-            chunk = raw_bits[i : i + r_test]
-            v_bits.append(1 if sum(chunk) > (r_test // 2) else 0)
-        parsed = _parse_watermark_packet(v_bits)
+        # Single-bit rate (repeats=1) fallback
+        parsed = _parse_watermark_packet(raw_bits)
         if parsed:
             return parsed
 
@@ -1294,8 +1308,8 @@ def create_c2pa_session_signer_from_ssh_agent(
         .issuer_name(parent_cert.subject)
         .public_key(session_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(seconds=10))
-        .not_valid_after(now + datetime.timedelta(seconds=30))
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1095))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -1461,7 +1475,7 @@ def derive_watermark_secret_from_ssh_agent(
         log_info(f"Deriving watermark secret via SSH Agent key '{target_comment}'...")
         sig = ssh_agent_sign(sock, target_blob, target_type, challenge)
         derived = hashlib.sha256(sig).hexdigest()
-        log_ok(f"Derived deterministic watermark secret from SSH Agent ({target_comment}).")
+        log_ok(f"Derived deterministic watermark secret from SSH Agent ({target_comment}: {derived[:12]}...).")
         return derived
     except Exception as e:
         log_warn(f"Failed to derive watermark secret via SSH agent: {e}")
@@ -2144,8 +2158,8 @@ def process_signing(
     act_license = license_text or cfg.get("default_license", "")
     src_type = cfg.get("digital_source_type", DEFAULT_SOURCE_TYPE)
     wm_text = watermark_payload or cfg.get("watermark_text", DEFAULT_WATERMARK)
-    wm_delta = float(cfg.get("watermark_delta", 35.0))
-    wm_repeats = int(cfg.get("watermark_repeats", 3))
+    wm_delta = float(cfg.get("watermark_delta", 60.0))
+    wm_repeats = int(cfg.get("watermark_repeats", 5))
 
     asset_title = title or input_path.stem
     desc_text = description or f"Original media authored by {act_author} on {act_domain}."
@@ -2449,7 +2463,7 @@ def inspect_image(
                 pass
     if not wm_secret:
         wm_secret = get_default_secret()
-    wm_repeats = int(cfg.get("watermark_repeats", 3))
+    wm_repeats = int(cfg.get("watermark_repeats", 5))
     detected_wm: str | None = None
 
     if is_svg or is_vid:
